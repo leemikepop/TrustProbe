@@ -1,5 +1,6 @@
 package io.github.leemikepop.trustprobe.tunnel
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -15,6 +16,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.text.format.DateFormat
 import android.util.Log
 import io.github.leemikepop.trustprobe.MainActivity
 import io.github.leemikepop.trustprobe.TrustProbeApp
@@ -23,9 +25,16 @@ import io.github.leemikepop.trustprobe.session.SessionState
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
+import java.util.Date
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
  * Per-app VPN: only the app under test is routed into the tun, which hev-socks5-tunnel turns into
@@ -33,15 +42,28 @@ import kotlinx.coroutines.flow.asStateFlow
  * which VPN apps qualify for) so the session survives while the user is in the app under test.
  *
  * Every end path (time limit, stop action, [onRevoke], target uninstalled, hev dying, [onDestroy])
- * goes through [finish]: stop hev, close the tun fd, then end the session if this instance owns
- * it. Lifecycle callbacks, the receiver and the Handler run on the main thread; [onRevoke] arrives
- * on a binder thread and is posted to the main thread, so all of this state is main-thread only.
+ * goes through [finish]: end the session if this instance owns it, then stop hev and close the tun
+ * fd. The session ends first so that connections torn down by the shutdown cannot be recorded as
+ * rejections. Lifecycle callbacks, the receiver, the Handler and [watch] run on the main thread;
+ * [onRevoke] arrives on a binder thread and is posted to the main thread, so all of this state is
+ * main-thread only.
+ *
+ * The time limit is wall-clock time ([endsAt], like `SessionState.Running.endsAt`). Handler delays
+ * stop counting in deep sleep, so the limit is checked on a short tick, on every engine event, and
+ * by an inexact allow-while-idle alarm; whichever runs first past [endsAt] finishes the session.
  */
 class TunnelService : VpnService() {
     private class Tunnel(val pfd: ParcelFileDescriptor, val target: String)
 
     private val main = Handler(Looper.getMainLooper())
-    private val timeLimit = Runnable { finish("time limit reached") }
+    private val watch = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var eventWatch: Job? = null
+    private var endsAt = Long.MAX_VALUE
+    private val deadlineTick = object : Runnable {
+        override fun run() {
+            if (!finishIfPastDeadline()) main.postDelayed(this, DEADLINE_TICK_MS)
+        }
+    }
     private val hevCheck = Runnable {
         if (tunnel != null && !NativeTunnel.isRunning()) finish("tunnel failed to start (hev exited)")
     }
@@ -66,6 +88,7 @@ class TunnelService : VpnService() {
         when (intent?.action) {
             ACTION_START -> begin(intent)
             ACTION_STOP -> finish("stopped by user")
+            ACTION_TIME_LIMIT -> if (tunnel == null) stopSelf() else finishIfPastDeadline()
             else -> if (tunnel == null) stopSelf()
         }
         return START_NOT_STICKY
@@ -78,6 +101,7 @@ class TunnelService : VpnService() {
 
     override fun onDestroy() {
         finish("service destroyed")
+        watch.cancel()
         super.onDestroy()
     }
 
@@ -143,27 +167,40 @@ class TunnelService : VpnService() {
         }
         _tunnelUp.value = true
         registerPackageRemoved()
-        main.postDelayed(timeLimit, (endsAt - System.currentTimeMillis()).coerceAtLeast(0))
+        this.endsAt = endsAt
+        main.post(deadlineTick)
+        eventWatch = watch.launch { controller.liveEvents.collect { finishIfPastDeadline() } }
+        // Inexact on purpose: exact alarms need SCHEDULE_EXACT_ALARM, which is denied by default.
+        getSystemService(AlarmManager::class.java)
+            .setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, endsAt, timeLimitAlarm())
         main.postDelayed(hevCheck, HEV_CHECK_DELAY_MS)
         Log.i(TAG, "session running for $target via SOCKS5 port $port")
         Log.i(TAG, "upstream DNS ${net.dns.hostAddress}, IPv6 routed: ${net.routeIpv6}")
     }
 
-    /** Stops hev, closes the tun fd, then ends the session if this instance owns it. Idempotent. */
+    /** Finishes once the wall clock has reached [endsAt]; returns true if the service is finished. */
+    private fun finishIfPastDeadline(): Boolean {
+        if (finished) return true
+        if (tunnel == null || System.currentTimeMillis() < endsAt) return false
+        finish("time limit reached")
+        return true
+    }
+
+    /**
+     * Ends the session if this instance owns it, so the engine stops recording before anything is
+     * torn down, then stops hev and closes the tun fd. Idempotent.
+     */
     private fun finish(reason: String) {
         finished = true
         _tunnelUp.value = false
-        main.removeCallbacks(timeLimit)
+        main.removeCallbacks(deadlineTick)
         main.removeCallbacks(hevCheck)
+        eventWatch?.cancel()
+        eventWatch = null
+        getSystemService(AlarmManager::class.java).cancel(timeLimitAlarm())
         if (receiverRegistered) {
             unregisterReceiver(packageRemoved)
             receiverRegistered = false
-        }
-        val t = tunnel
-        tunnel = null
-        if (t != null) {
-            NativeTunnel.stop()
-            runCatching { t.pfd.close() }
         }
         if (ownsSession) {
             ownsSession = false
@@ -173,9 +210,20 @@ class TunnelService : VpnService() {
         } else {
             Log.i(TAG, "tunnel service stopping without a session: $reason")
         }
+        val t = tunnel
+        tunnel = null
+        if (t != null) {
+            NativeTunnel.stop()
+            runCatching { t.pfd.close() }
+        }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
+
+    private fun timeLimitAlarm(): PendingIntent = PendingIntent.getService(
+        this, 2, Intent(this, TunnelService::class.java).setAction(ACTION_TIME_LIMIT),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
 
     private fun controller() = (application as TrustProbeApp).sessionController
 
@@ -207,9 +255,11 @@ class TunnelService : VpnService() {
     }
 
     /**
-     * An ongoing notification with a countdown to [endsAt] and a stop action. If notifications are
-     * denied the service still runs in the foreground; only the notification is hidden. Returns
-     * false (after finishing) if the system refuses the foreground service.
+     * An ongoing notification with the wall-clock end time and a stop action. It shows a fixed end
+     * time, not a countdown: a notification chronometer keeps counting below zero, and the service
+     * may be asleep at the moment the time runs out. If notifications are denied the service still
+     * runs in the foreground; only the notification is hidden. Returns false (after finishing) if
+     * the system refuses the foreground service.
      */
     private fun goForeground(target: String, endsAt: Long): Boolean {
         val nm = getSystemService(NotificationManager::class.java)
@@ -225,12 +275,9 @@ class TunnelService : VpnService() {
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setContentTitle("Testing $target")
-            .setContentText("Use the app now; the test stops automatically.")
+            .setContentText("Use the app now; the test stops at ${DateFormat.getTimeFormat(this).format(Date(endsAt))}.")
             .setOngoing(true)
-            .setWhen(endsAt)
-            .setShowWhen(true)
-            .setUsesChronometer(true)
-            .setChronometerCountDown(true)
+            .setShowWhen(false)
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
             .build()
@@ -254,6 +301,7 @@ class TunnelService : VpnService() {
         private const val TAG = "TrustProbe"
         private const val ACTION_START = "io.github.leemikepop.trustprobe.action.START"
         private const val ACTION_STOP = "io.github.leemikepop.trustprobe.action.STOP"
+        private const val ACTION_TIME_LIMIT = "io.github.leemikepop.trustprobe.action.TIME_LIMIT"
         private const val EXTRA_PACKAGE = "package"
         private const val EXTRA_PORT = "port"
         private const val EXTRA_USERNAME = "username"
@@ -263,6 +311,7 @@ class TunnelService : VpnService() {
         private const val NOTIFICATION_ID = 1
         private const val FALLBACK_DNS = "1.1.1.1"
         private const val HEV_CHECK_DELAY_MS = 1_500L
+        private const val DEADLINE_TICK_MS = 1_000L
 
         private val _tunnelUp = MutableStateFlow(false)
 
