@@ -122,6 +122,51 @@ class SessionControllerTest {
     }
 
     @Test
+    fun discardFinishedDeletesAnEmptySessionOnce() {
+        controller.begin("com.example.app", "Example")
+        controller.end()
+
+        controller.discardFinished()
+        controller.discardFinished()
+
+        assertEquals(listOf(1L), store.discarded)
+    }
+
+    @Test
+    fun discardFinishedKeepsASessionWithEvents() {
+        controller.begin("com.example.app", "Example")
+        sendEvent(probed("a.example", ProbeCase.T2_UNTRUSTED_CA, OutcomeKind.REJECTED, 1_100))
+        controller.end()
+
+        controller.discardFinished()
+
+        assertEquals(emptyList<Long>(), store.discarded)
+    }
+
+    @Test
+    fun engineFailureAtBeginLeavesNoStoredSession() {
+        val failing = SessionController({ _, _ -> error("no engine") }, { now }, store)
+
+        assertTrue(runCatching { failing.begin("com.example.app", "Example") }.isFailure)
+
+        assertEquals(listOf(1L), store.discarded)
+        assertEquals(SessionState.Idle, failing.state.value)
+        assertNull(failing.credentials)
+    }
+
+    @Test
+    fun clearPlaintextDropsUnredactedBytes() {
+        controller.begin("com.example.app", "Example")
+        sendPlaintext("a.example", ProbeCase.T2_UNTRUSTED_CA, "GET / HTTP/1.1\r\n\r\n".toByteArray())
+        controller.end()
+        assertEquals(1, controller.plaintext.size)
+
+        controller.clearPlaintext()
+
+        assertTrue(controller.plaintext.isEmpty())
+    }
+
+    @Test
     fun eventsAfterEndAreIgnored() {
         controller.begin("com.example.app", "Example")
         val before = probed("a.example", ProbeCase.T2_UNTRUSTED_CA, OutcomeKind.ACCEPTED, 1_100)
@@ -148,6 +193,7 @@ private class RecordingStore : SessionStore {
     }
 
     val sessions = mutableListOf<Record>()
+    val discarded = mutableListOf<Long>()
 
     @Synchronized
     override fun open(packageName: String, appLabel: String, startedAt: Long, durationLimitSec: Int): Long {
@@ -163,5 +209,10 @@ private class RecordingStore : SessionStore {
     @Synchronized
     override fun finish(sessionId: Long, endedAt: Long) {
         sessions[sessionId.toInt() - 1].apply { this.endedAt = endedAt; finishCalls++ }
+    }
+
+    @Synchronized
+    override fun discard(sessionId: Long) {
+        discarded += sessionId
     }
 }

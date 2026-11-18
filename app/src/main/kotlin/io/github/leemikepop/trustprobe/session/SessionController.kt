@@ -48,6 +48,7 @@ class SessionController(
     private val _liveEvents = MutableStateFlow<List<EngineEvent>>(emptyList())
     private val _plaintext = ConcurrentHashMap<String, ByteArray>()
     @Volatile private var active: Active? = null
+    private var finishedId: Long? = null // guarded by lock: the id of the session in Finished
 
     val state: StateFlow<SessionState> = _state.asStateFlow()
     val liveEvents: StateFlow<List<EngineEvent>> = _liveEvents.asStateFlow()
@@ -68,17 +69,18 @@ class SessionController(
         val startedAt = clock()
         val id = store.open(packageName, appLabel, startedAt, durationSec)
         val session = Active(id, packageName, appLabel, startedAt)
+        finishedId = null
         _liveEvents.value = emptyList()
         _plaintext.clear()
-        session.engine = engineFactory(
-            { e -> onEvent(session, e) },
-            { host, case, bytes -> onPlaintext(session, host, case, bytes) },
-        )
         val port = try {
+            session.engine = engineFactory(
+                { e -> onEvent(session, e) },
+                { host, case, bytes -> onPlaintext(session, host, case, bytes) },
+            )
             session.engine.start()
         } catch (e: Exception) {
-            session.engine.stop()
-            store.finish(id, clock())
+            runCatching { session.engine.stop() } // throws if the factory itself failed
+            store.discard(id) // it never ran: leave no empty row in the history
             throw e
         }
         session.port = port
@@ -100,8 +102,26 @@ class SessionController(
         store.finish(session.id, endedAt)
         val report = ReportBuilder.build(session.packageName, session.appLabel, session.startedAt, endedAt, events)
         active = null
+        finishedId = session.id
         _state.value = SessionState.Finished(report)
         report
+    }
+
+    /**
+     * Deletes the stored session that just finished if it recorded no events, for a session that
+     * was aborted because the tunnel could not start. No-op otherwise.
+     */
+    fun discardFinished(): Unit = synchronized(lock) {
+        val finished = _state.value as? SessionState.Finished ?: return
+        val id = finishedId ?: return
+        if (finished.report.events.isNotEmpty()) return
+        finishedId = null
+        store.discard(id)
+    }
+
+    /** Drops the unredacted first requests; call when they are no longer on screen. */
+    fun clearPlaintext() {
+        _plaintext.clear()
     }
 
     private fun onEvent(session: Active, e: EngineEvent): Unit = synchronized(session) {

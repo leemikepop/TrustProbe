@@ -46,6 +46,7 @@ class TrustProbeViewModelTest {
         var ended = 0
         var endFails = false
         var beginCount = 0
+        var discards = 0
 
         override fun begin(packageName: String, appLabel: String, durationSec: Int): Int {
             beginCount++
@@ -60,6 +61,12 @@ class TrustProbeViewModelTest {
             if (endFails) throw IllegalStateException("end failed")
             return report("com.example.app").also { state.value = SessionState.Finished(it) }
         }
+
+        override fun discardFinished() {
+            discards++
+        }
+
+        override fun clearPlaintext() = plaintext.clear()
     }
 
     private class FakeHistory(
@@ -150,7 +157,8 @@ class TrustProbeViewModelTest {
         assertFalse(vm.reportUi.value!!.canReveal)
         vm.toggleReveal()
         assertFalse(vm.reportUi.value!!.revealed)
-        assertNull(vm.fullContent("a.example", ProbeCase.T2_UNTRUSTED_CA)) // plaintext still in memory, still hidden
+        assertNull(vm.fullContent("a.example", ProbeCase.T2_UNTRUSTED_CA))
+        assertTrue(session.plaintext.isEmpty()) // leaving the live report dropped it
     }
 
     @Test
@@ -164,6 +172,7 @@ class TrustProbeViewModelTest {
         assertEquals(Screen.Picker, vm.screen.value)
         assertNull(vm.reportUi.value)
         assertFalse(vm.starting.value)
+        assertEquals(1, session.discards) // the aborted session leaves no history row
     }
 
     @Test
@@ -230,6 +239,69 @@ class TrustProbeViewModelTest {
         assertEquals("Test could not start.", vm.error.value)
         assertEquals(Screen.Picker, vm.screen.value)
         assertNull(vm.reportUi.value)
+        assertEquals(1, session.discards)
+    }
+
+    @Test
+    fun quickStopShowsTheEmptyReportAndKeepsIt() {
+        val vm = vm()
+        vm.start(AppInfo("com.example.app", "Example"))
+        vm.stop()
+        session.state.value = SessionState.Finished(
+            ReportBuilder.build("com.example.app", "Example", 1_000L, 2_000L, emptyList()),
+        )
+
+        assertNull(vm.error.value)
+        assertEquals(Screen.Report, vm.screen.value)
+        assertEquals(Verdict.INCONCLUSIVE, vm.reportUi.value!!.report.appVerdict)
+        assertEquals(0, session.discards)
+    }
+
+    @Test
+    fun stopIsForgottenOnceTheSessionFinished() {
+        val vm = vm()
+        vm.start(AppInfo("com.example.app", "Example"))
+        vm.stop()
+        session.state.value = SessionState.Finished(report("com.example.app"))
+        vm.back()
+
+        vm.start(AppInfo("com.example.app", "Example"))
+        session.state.value = SessionState.Finished(
+            ReportBuilder.build("com.example.app", "Example", 1_000L, 2_000L, emptyList()),
+        )
+
+        assertEquals("Test could not start.", vm.error.value)
+        assertEquals(1, session.discards)
+    }
+
+    @Test
+    fun leavingTheReportClearsPlaintext() {
+        val vm = vm()
+        vm.start(AppInfo("com.example.app", "Example"))
+        session.plaintext["a.example/T2_UNTRUSTED_CA"] = "GET / HTTP/1.1\r\n".toByteArray()
+        session.state.value = SessionState.Finished(report("com.example.app"))
+
+        vm.back()
+
+        assertTrue(session.plaintext.isEmpty())
+    }
+
+    @Test
+    fun hidingFullContentClearsPlaintext() {
+        val vm = vm()
+        vm.start(AppInfo("com.example.app", "Example"))
+        session.plaintext["a.example/T2_UNTRUSTED_CA"] = "GET / HTTP/1.1\r\n".toByteArray()
+        session.state.value = SessionState.Finished(report("com.example.app"))
+        vm.toggleReveal()
+        assertEquals("GET / HTTP/1.1\r\n", vm.fullContent("a.example", ProbeCase.T2_UNTRUSTED_CA))
+
+        vm.toggleReveal()
+
+        assertTrue(session.plaintext.isEmpty())
+        assertFalse(vm.reportUi.value!!.revealed)
+        assertFalse(vm.reportUi.value!!.canReveal) // nothing left to show
+        vm.toggleReveal()
+        assertNull(vm.fullContent("a.example", ProbeCase.T2_UNTRUSTED_CA))
     }
 
     @Test

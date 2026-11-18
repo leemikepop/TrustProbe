@@ -20,7 +20,7 @@ import kotlinx.serialization.json.Json
  * engine threads, so every write runs on one private thread, in submission order.
  *
  * [open] blocks until its row exists, so `SessionController.begin()` must be called off the main
- * thread (for example from `Dispatchers.IO`). [append] and [finish] are fire-and-forget.
+ * thread (for example from `Dispatchers.IO`). [append], [finish] and [discard] are fire-and-forget.
  *
  * Verdicts are never stored; [report] recomputes them from the events with [ReportBuilder].
  */
@@ -61,6 +61,13 @@ class RoomSessionStore(
 
     override fun finish(sessionId: Long, endedAt: Long) {
         enqueue("finish") { dao.finish(sessionId, endedAt) }
+    }
+
+    override fun discard(sessionId: Long) {
+        enqueue("discard") {
+            dao.deleteEvents(sessionId)
+            dao.delete(sessionId)
+        }
     }
 
     /** Rebuilds the report of a stored session, or null if there is no such session. */

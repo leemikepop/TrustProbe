@@ -45,6 +45,12 @@ interface SessionGateway {
     /** Blocks on a database insert: call off the main thread. */
     fun begin(packageName: String, appLabel: String, durationSec: Int): Int
     fun end(): Report
+
+    /** Deletes the just-finished session from history if it recorded nothing. */
+    fun discardFinished()
+
+    /** Drops the unredacted first requests from memory. */
+    fun clearPlaintext()
 }
 
 /** Past sessions; reports are rebuilt lazily, one at a time. */
@@ -67,8 +73,8 @@ sealed interface Screen {
 }
 
 /**
- * [canReveal] is true only for the session that just finished in this process; a report reopened
- * from history has no plaintext to show.
+ * [canReveal] is true only for the session that just finished in this process, until its content is
+ * hidden again; a report reopened from history has no plaintext to show.
  */
 data class ReportUi(val report: Report, val canReveal: Boolean, val revealed: Boolean = false)
 
@@ -93,6 +99,7 @@ class TrustProbeViewModel(
     )
     private var reportFromHistory = false
     private var startAborted = false
+    private var stopRequested = false
 
     val query: StateFlow<String> = _query.asStateFlow()
     val durationMin: StateFlow<Int> = _durationMin.asStateFlow()
@@ -136,18 +143,24 @@ class TrustProbeViewModel(
                         _reportUi.value = null
                         _screen.value = Screen.Session
                     }
-                    is SessionState.Finished -> when {
-                        first -> Unit // a finished session left over from before this screen existed
-                        startAborted -> {
-                            startAborted = false
-                            _screen.value = Screen.Picker
+                    is SessionState.Finished -> {
+                        when {
+                            first -> Unit // a finished session left over from before this screen existed
+                            startAborted -> {
+                                startAborted = false
+                                session.discardFinished()
+                                _screen.value = Screen.Picker
+                            }
+                            !stopRequested && s.report.events.isEmpty() &&
+                                s.report.endedAt - s.report.startedAt < START_FAILURE_WINDOW_MS -> {
+                                // The service refused the start and ended the session: nothing to report.
+                                session.discardFinished()
+                                _error.value = "Test could not start."
+                                _screen.value = Screen.Picker
+                            }
+                            else -> showReport(ReportUi(s.report, canReveal = true), fromHistory = false)
                         }
-                        s.report.events.isEmpty() && s.report.endedAt - s.report.startedAt < START_FAILURE_WINDOW_MS -> {
-                            // The service refused the start and ended the session: nothing to report.
-                            _error.value = "Test could not start."
-                            _screen.value = Screen.Picker
-                        }
-                        else -> showReport(ReportUi(s.report, canReveal = true), fromHistory = false)
+                        stopRequested = false
                     }
                 }
                 first = false
@@ -183,6 +196,7 @@ class TrustProbeViewModel(
         if (_starting.value || session.state.value is SessionState.Running) return
         _starting.value = true
         _error.value = null
+        stopRequested = false
         val durationSec = _durationMin.value * 60
         savedState[KEY_RUN_PKG] = app.packageName
         savedState[KEY_RUN_LABEL] = app.label
@@ -222,6 +236,7 @@ class TrustProbeViewModel(
      * controller would stay Running forever, so end it here when nothing ended it shortly after.
      */
     fun stop() {
+        stopRequested = true // a quick stop is the user's choice, not a failed start
         tunnel.stop()
         viewModelScope.launch {
             delay(ORPHAN_GRACE_MS)
@@ -251,7 +266,9 @@ class TrustProbeViewModel(
         }
     }
 
+    /** Leaving the report of the session that just finished also drops its unredacted content. */
     fun back() {
+        if (_screen.value == Screen.Report && _reportUi.value?.canReveal == true) session.clearPlaintext()
         _reportUi.value = _reportUi.value?.copy(revealed = false)
         _screen.value = when (_screen.value) {
             Screen.Report -> if (reportFromHistory) Screen.History else Screen.Picker
@@ -259,9 +276,16 @@ class TrustProbeViewModel(
         }
     }
 
+    /** Hiding the full content also drops it from memory, so it cannot be shown again. */
     fun toggleReveal() {
         val ui = _reportUi.value ?: return
-        if (ui.canReveal) _reportUi.value = ui.copy(revealed = !ui.revealed)
+        if (!ui.canReveal) return
+        if (ui.revealed) {
+            session.clearPlaintext()
+            _reportUi.value = ui.copy(revealed = false, canReveal = false)
+        } else {
+            _reportUi.value = ui.copy(revealed = true)
+        }
     }
 
     /** The unmasked first request for an accepted case, or null unless the user asked to reveal it. */

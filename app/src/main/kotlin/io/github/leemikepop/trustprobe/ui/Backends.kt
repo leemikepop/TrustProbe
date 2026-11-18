@@ -23,6 +23,8 @@ class ControllerGateway(private val c: SessionController) : SessionGateway {
     override fun begin(packageName: String, appLabel: String, durationSec: Int) =
         c.begin(packageName, appLabel, durationSec)
     override fun end(): Report = c.end()
+    override fun discardFinished() = c.discardFinished()
+    override fun clearPlaintext() = c.clearPlaintext()
 }
 
 class RoomHistory(private val dao: SessionDao, private val store: RoomSessionStore) : HistorySource {

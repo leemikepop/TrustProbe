@@ -16,6 +16,12 @@ interface SessionDao {
     @Insert
     fun insertEvent(e: EventEntity)
 
+    @Query("DELETE FROM SessionEntity WHERE id = :id")
+    fun delete(id: Long)
+
+    @Query("DELETE FROM EventEntity WHERE sessionId = :sessionId")
+    fun deleteEvents(sessionId: Long)
+
     @Query("SELECT * FROM SessionEntity ORDER BY startedAt DESC")
     fun sessions(): Flow<List<SessionEntity>>
 
