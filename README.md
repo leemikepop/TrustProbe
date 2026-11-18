@@ -100,7 +100,7 @@ git clone --recurse-submodules https://github.com/leemikepop/TrustProbe.git
 # already cloned: git submodule update --init --recursive
 ```
 
-Requirements: JDK 17+ (CI uses 21), Android SDK platform 37, NDK `30.0.14904198`, CMake.
+Requirements: JDK 17+ (CI uses 21), Android SDK platform 37, NDK `30.0.14904198` (the native code is built with ndk-build; no CMake needed).
 
 ```bash
 ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug :testbed:assembleDebug lint
@@ -124,12 +124,15 @@ CI (`.github/workflows/ci.yml`) runs the build, unit tests and lint on every pus
 
 | Component | License | Use |
 |---|---|---|
-| [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) | MIT | git submodule, unmodified, native tun-to-SOCKS5 |
+| [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) (with hev-socks5-core) | MIT | git submodule, unmodified, native tun-to-SOCKS5 |
+| [hev-task-system](https://github.com/heiher/hev-task-system) | MIT | inside the hev-socks5-tunnel submodule |
+| [lwIP](https://github.com/heiher/lwip) | BSD-3-Clause | inside the hev-socks5-tunnel submodule (TCP/IP stack) |
+| [yaml](https://github.com/heiher/yaml) (a branch of libyaml) | MIT | inside the hev-socks5-tunnel submodule (config parsing) |
 | Bouncy Castle (`bcpkix`, `bcprov`) | Bouncy Castle License (MIT-style) | generating test certificates |
 | OkHttp | Apache-2.0 | testbed app only |
 | AndroidX, Jetpack Compose, Room, Kotlin, kotlinx libraries | Apache-2.0 | app and core |
 
-TrustProbe itself is MIT licensed ([LICENSE](LICENSE)).
+Versions, commits and the full notice texts: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). TrustProbe itself is MIT licensed ([LICENSE](LICENSE)).
 
 ## Background
 
