@@ -19,6 +19,8 @@ import io.github.leemikepop.trustprobe.session.SessionState
 import io.github.leemikepop.trustprobe.tunnel.TunnelService
 import java.io.FileInputStream
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -136,6 +138,21 @@ class TestbedVerdictsTest {
 
         val www = host("www.example.com")
         check("www.example.com verdict ${www.verdict}", www.verdict == Verdict.PASS)
+
+        // The report rebuilt from Room (what History shows) must match the live one.
+        val app = context.applicationContext as TrustProbeApp
+        val stored = runBlocking {
+            val row = app.sessionDao.sessions().first()
+                .firstOrNull { it.packageName == TESTBED && it.startedAt == report.startedAt }
+            row?.let { app.sessionStore.report(it.id) }
+        }
+        check("no stored session for this run", stored != null)
+        check("stored hosts differ: ${stored!!.hosts}", stored.hosts == report.hosts)
+        check(
+            "stored app verdict ${stored.appVerdict} (${stored.appReason})",
+            stored.appVerdict == report.appVerdict && stored.appReason == report.appReason,
+        )
+        check("stored endedAt ${stored.endedAt} vs ${report.endedAt}", stored.endedAt == report.endedAt)
     }
 
     /** Starts the testbed, checks that it really came to the foreground, returns the launch time. */
