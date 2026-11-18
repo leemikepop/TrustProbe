@@ -1,5 +1,6 @@
 package io.github.leemikepop.trustprobe.ui
 
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.leemikepop.trustprobe.core.EngineEvent
@@ -20,6 +21,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -77,6 +79,7 @@ class TrustProbeViewModel(
     private val tunnel: TunnelLauncher,
     private val selfPackage: String,
     private val io: CoroutineDispatcher = Dispatchers.IO,
+    private val savedState: SavedStateHandle = SavedStateHandle(),
 ) : ViewModel() {
     private val allApps = MutableStateFlow<List<AppInfo>>(emptyList())
     private val _query = MutableStateFlow("")
@@ -85,7 +88,9 @@ class TrustProbeViewModel(
     private val _reportUi = MutableStateFlow<ReportUi?>(null)
     private val _error = MutableStateFlow<String?>(null)
     private val _starting = MutableStateFlow(false)
-    private val _selected = MutableStateFlow<AppInfo?>(null)
+    private val _selected = MutableStateFlow(
+        savedState.get<String>(KEY_SEL_PKG)?.let { AppInfo(it, savedState.get<String>(KEY_SEL_LABEL) ?: it) },
+    )
     private var reportFromHistory = false
     private var startAborted = false
 
@@ -108,7 +113,17 @@ class TrustProbeViewModel(
             .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.label })
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    val sessions: Flow<List<SessionEntity>> get() = history.sessions()
+    /** Past sessions, newest first; null until the first load. */
+    val sessions: StateFlow<List<SessionEntity>?> =
+        history.sessions().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** The label of the app under test, falling back to its package name. */
+    fun labelFor(packageName: String): String =
+        if (savedState.get<String>(KEY_RUN_PKG) == packageName) {
+            savedState.get<String>(KEY_RUN_LABEL) ?: packageName
+        } else {
+            packageName
+        }
 
     init {
         viewModelScope.launch { allApps.value = withContext(io) { catalog.launchableApps() } }
@@ -127,6 +142,11 @@ class TrustProbeViewModel(
                             startAborted = false
                             _screen.value = Screen.Picker
                         }
+                        s.report.events.isEmpty() && s.report.endedAt - s.report.startedAt < START_FAILURE_WINDOW_MS -> {
+                            // The service refused the start and ended the session: nothing to report.
+                            _error.value = "Test could not start."
+                            _screen.value = Screen.Picker
+                        }
                         else -> showReport(ReportUi(s.report, canReveal = true), fromHistory = false)
                     }
                 }
@@ -141,11 +161,17 @@ class TrustProbeViewModel(
 
     fun select(app: AppInfo) {
         _selected.value = app
+        savedState[KEY_SEL_PKG] = app.packageName
+        savedState[KEY_SEL_LABEL] = app.label
     }
 
     fun setDuration(minutes: Int) {
         require(minutes in DURATIONS_MIN)
         _durationMin.value = minutes
+    }
+
+    fun onConsentDenied() {
+        _error.value = "VPN permission is needed to run a test."
     }
 
     fun dismissError() {
@@ -158,6 +184,8 @@ class TrustProbeViewModel(
         _starting.value = true
         _error.value = null
         val durationSec = _durationMin.value * 60
+        savedState[KEY_RUN_PKG] = app.packageName
+        savedState[KEY_RUN_LABEL] = app.label
         viewModelScope.launch {
             try {
                 val port = withContext(io) { session.begin(app.packageName, app.label, durationSec) }
@@ -166,21 +194,40 @@ class TrustProbeViewModel(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    // Set before end(): the state collector may see Finished as soon as end() returns.
                     startAborted = true
-                    runCatching { session.end() }
+                    val ended = runCatching { session.end() }
+                    if (ended.isFailure) {
+                        startAborted = false
+                        throw IllegalStateException(
+                            "${e.message ?: e.javaClass.simpleName} (the session could not be closed: " +
+                                "${ended.exceptionOrNull()?.message}; press Stop)",
+                            e,
+                        )
+                    }
                     throw e
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _error.value = e.message ?: e.javaClass.simpleName
+                _error.value = "Could not start the test: ${e.message ?: e.javaClass.simpleName}"
             } finally {
                 _starting.value = false
             }
         }
     }
 
-    fun stop() = tunnel.stop()
+    /**
+     * Asks the service to stop. If no service owns the session (it never started, or died), the
+     * controller would stay Running forever, so end it here when nothing ended it shortly after.
+     */
+    fun stop() {
+        tunnel.stop()
+        viewModelScope.launch {
+            delay(ORPHAN_GRACE_MS)
+            if (session.state.value is SessionState.Running) withContext(io) { runCatching { session.end() } }
+        }
+    }
 
     fun openHistory() {
         _screen.value = Screen.History
@@ -188,7 +235,14 @@ class TrustProbeViewModel(
 
     fun openHistory(sessionId: Long) {
         viewModelScope.launch {
-            val report = withContext(io) { history.report(sessionId) }
+            val report = try {
+                withContext(io) { history.report(sessionId) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = "This report could not be loaded."
+                return@launch
+            }
             if (report == null) {
                 _error.value = "This report no longer exists."
             } else {
@@ -224,6 +278,12 @@ class TrustProbeViewModel(
     }
 
     companion object {
+        private const val KEY_SEL_PKG = "selectedPackage"
+        private const val KEY_SEL_LABEL = "selectedLabel"
+        private const val KEY_RUN_PKG = "runningPackage"
+        private const val KEY_RUN_LABEL = "runningLabel"
+        private const val START_FAILURE_WINDOW_MS = 5_000L
+        private const val ORPHAN_GRACE_MS = 2_000L
         const val DEFAULT_MINUTES = 5
         val DURATIONS_MIN = listOf(2, 5, 10)
     }
@@ -233,4 +293,4 @@ private val FILE_STAMP = DateTimeFormatter.ofPattern("yyyyMMdd-HHmm")
 
 /** `trustprobe-<package>-<yyyyMMdd-HHmm>.<ext>`, with the time of the session start. */
 fun exportFileName(report: Report, ext: String, zone: ZoneId = ZoneId.systemDefault()): String =
-    "trustprobe-${report.packageName}-${FILE_STAMP.format(Instant.ofEpochMilli(report.startedAt).atZone(zone))}.$ext"
+    "trustprobe-${report.packageName.replace(Regex("[^A-Za-z0-9._-]"), "_")}-${FILE_STAMP.format(Instant.ofEpochMilli(report.startedAt).atZone(zone))}.$ext"

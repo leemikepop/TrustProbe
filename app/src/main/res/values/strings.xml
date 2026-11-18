@@ -9,7 +9,6 @@
     <string name="picker_starting">Starting…</string>
     <string name="picker_empty">No matching apps</string>
     <string name="history">History</string>
-    <string name="start_error">Could not start the test: %1$s</string>
     <string name="dismiss">Dismiss</string>
     <string name="back">Back</string>
 

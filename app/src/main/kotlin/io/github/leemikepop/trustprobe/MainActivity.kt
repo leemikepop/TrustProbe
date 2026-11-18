@@ -6,6 +6,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.createSavedStateHandle
+import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.leemikepop.trustprobe.ui.ControllerGateway
 import io.github.leemikepop.trustprobe.ui.PackageManagerCatalog
@@ -22,12 +24,13 @@ class MainActivity : ComponentActivity() {
         val app = application as TrustProbeApp
         val factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
-            override fun <T : ViewModel> create(modelClass: Class<T>): T = TrustProbeViewModel(
+            override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T = TrustProbeViewModel(
                 catalog = PackageManagerCatalog(app),
                 session = ControllerGateway(app.sessionController),
                 history = RoomHistory(app.sessionDao, app.sessionStore),
                 tunnel = ServiceTunnelLauncher(app),
                 selfPackage = packageName,
+                savedState = extras.createSavedStateHandle(),
             ) as T
         }
         setContent {

@@ -66,7 +66,7 @@ fun AppPickerScreen(vm: TrustProbeViewModel) {
         if (needsAsk) notifications.launch(Manifest.permission.POST_NOTIFICATIONS) else startSelected()
     }
     val consent = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        if (it.resultCode == Activity.RESULT_OK) afterConsent()
+        if (it.resultCode == Activity.RESULT_OK) afterConsent() else vm.onConsentDenied()
     }
     fun onStart() {
         val prepare = VpnService.prepare(context)

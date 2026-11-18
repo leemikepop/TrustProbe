@@ -51,7 +51,7 @@ fun TrustProbeRoot(vm: TrustProbeViewModel) {
     error?.let { message ->
         AlertDialog(
             onDismissRequest = vm::dismissError,
-            text = { Text(stringResource(R.string.start_error, message)) },
+            text = { Text(message) },
             confirmButton = { TextButton(onClick = vm::dismissError) { Text(stringResource(R.string.dismiss)) } },
         )
     }

@@ -49,7 +49,7 @@ fun SessionScreen(vm: TrustProbeViewModel) {
 
     Scaffold(
         topBar = {
-            CenterAlignedTopAppBar(title = { Text(stringResource(R.string.session_title, running?.packageName.orEmpty())) })
+            CenterAlignedTopAppBar(title = { Text(stringResource(R.string.session_title, running?.let { vm.labelFor(it.packageName) }.orEmpty())) })
         },
     ) { padding ->
         Column(

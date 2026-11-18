@@ -44,8 +44,11 @@ class TrustProbeViewModelTest {
         override val plaintext = HashMap<String, ByteArray>()
         var begun: Triple<String, String, Int>? = null
         var ended = 0
+        var endFails = false
+        var beginCount = 0
 
         override fun begin(packageName: String, appLabel: String, durationSec: Int): Int {
+            beginCount++
             begun = Triple(packageName, appLabel, durationSec)
             credentials = Socks5Credentials("u", "p")
             state.value = SessionState.Running(packageName, 1_000L + durationSec * 1_000L)
@@ -54,14 +57,21 @@ class TrustProbeViewModelTest {
 
         override fun end(): Report {
             ended++
+            if (endFails) throw IllegalStateException("end failed")
             return report("com.example.app").also { state.value = SessionState.Finished(it) }
         }
     }
 
-    private class FakeHistory(val rows: List<SessionEntity> = emptyList(), val reports: Map<Long, Report> = emptyMap()) :
-        HistorySource {
+    private class FakeHistory(
+        val rows: List<SessionEntity> = emptyList(),
+        val reports: Map<Long, Report> = emptyMap(),
+        val failWith: Exception? = null,
+    ) : HistorySource {
         override fun sessions(): Flow<List<SessionEntity>> = flowOf(rows)
-        override suspend fun report(id: Long) = reports[id]
+        override suspend fun report(id: Long): Report? {
+            failWith?.let { throw it }
+            return reports[id]
+        }
     }
 
     private class FakeTunnel(var failWith: Exception? = null) : TunnelLauncher {
@@ -150,10 +160,118 @@ class TrustProbeViewModelTest {
         vm.start(AppInfo("com.example.app", "Example"))
 
         assertEquals(1, session.ended)
-        assertEquals("foreground refused", vm.error.value)
+        assertEquals("Could not start the test: foreground refused", vm.error.value)
         assertEquals(Screen.Picker, vm.screen.value)
         assertNull(vm.reportUi.value)
         assertFalse(vm.starting.value)
+    }
+
+    @Test
+    fun startFailureWithFailingEndLeavesStopAvailable() {
+        tunnel.failWith = IllegalStateException("foreground refused")
+        session.endFails = true
+        val vm = vm()
+        vm.start(AppInfo("com.example.app", "Example"))
+
+        assertTrue(vm.error.value!!.contains("press Stop"))
+        assertTrue(session.state.value is SessionState.Running) // still running, so the user can stop it
+        assertEquals(Screen.Session, vm.screen.value)
+
+        session.endFails = false
+        vm.stop()
+        assertEquals(1, tunnel.stops)
+        dispatcher.scheduler.advanceTimeBy(2_001)
+        assertEquals(2, session.ended) // the failed attempt plus the orphan cleanup
+        assertTrue(session.state.value is SessionState.Finished)
+    }
+
+    @Test
+    fun stopEndsOrphanedRunningSession() {
+        val vm = vm()
+        vm.start(AppInfo("com.example.app", "Example"))
+        vm.stop()
+        assertEquals(0, session.ended) // grace period: the service may still end it
+        dispatcher.scheduler.advanceTimeBy(2_001)
+        assertEquals(1, session.ended)
+    }
+
+    @Test
+    fun stopLeavesSessionAloneWhenServiceEndedIt() {
+        val vm = vm()
+        vm.start(AppInfo("com.example.app", "Example"))
+        vm.stop()
+        session.state.value = SessionState.Finished(report("com.example.app"))
+        dispatcher.scheduler.advanceTimeBy(2_001)
+        assertEquals(0, session.ended)
+    }
+
+    @Test
+    fun openHistoryFailureShowsError() {
+        val vm = vm(history = FakeHistory(failWith = IllegalStateException("bad json")))
+        vm.openHistory()
+        vm.openHistory(1L)
+        assertEquals("This report could not be loaded.", vm.error.value)
+        assertEquals(Screen.History, vm.screen.value)
+
+        val missing = vm(history = FakeHistory())
+        missing.openHistory()
+        missing.openHistory(2L)
+        assertEquals("This report no longer exists.", missing.error.value)
+        assertEquals(Screen.History, missing.screen.value)
+    }
+
+    @Test
+    fun emptyQuickEndedReportShowsErrorNotReport() {
+        val vm = vm()
+        vm.start(AppInfo("com.example.app", "Example"))
+        session.state.value = SessionState.Finished(
+            ReportBuilder.build("com.example.app", "Example", 1_000L, 2_000L, emptyList()),
+        )
+        assertEquals("Test could not start.", vm.error.value)
+        assertEquals(Screen.Picker, vm.screen.value)
+        assertNull(vm.reportUi.value)
+    }
+
+    @Test
+    fun secondStartWhileRunningIsIgnored() {
+        val vm = vm()
+        vm.start(AppInfo("com.example.app", "Example"))
+        vm.start(AppInfo("com.other", "Other"))
+        assertEquals(1, session.beginCount)
+        assertEquals("com.example.app", session.begun!!.first)
+    }
+
+    @Test
+    fun newSessionResetsReveal() {
+        val vm = vm()
+        vm.start(AppInfo("com.example.app", "Example"))
+        session.state.value = SessionState.Finished(report("com.example.app"))
+        vm.toggleReveal()
+        assertTrue(vm.reportUi.value!!.revealed)
+
+        vm.back()
+        vm.start(AppInfo("com.example.app", "Example"))
+        assertNull(vm.reportUi.value)
+        session.state.value = SessionState.Finished(report("com.example.app"))
+        assertFalse(vm.reportUi.value!!.revealed)
+    }
+
+    @Test
+    fun selectedAppAndLabelSurviveInSavedState() {
+        val saved = androidx.lifecycle.SavedStateHandle()
+        val first = TrustProbeViewModel(FakeCatalog(emptyList()), session, FakeHistory(), tunnel, SELF, dispatcher, saved)
+        first.select(AppInfo("com.example.app", "Example"))
+        first.start(AppInfo("com.example.app", "Example"))
+        val second = TrustProbeViewModel(FakeCatalog(emptyList()), session, FakeHistory(), tunnel, SELF, dispatcher, saved)
+        assertEquals(AppInfo("com.example.app", "Example"), second.selected.value)
+        assertEquals("Example", second.labelFor("com.example.app"))
+        assertEquals("com.other", second.labelFor("com.other"))
+    }
+
+    @Test
+    fun exportFileNameIsSanitised() {
+        val r = report("com.ex ample/../x").copy(startedAt = 1_700_000_000_000L)
+        assertEquals("trustprobe-com.ex_ample_.._x-20231114-2213.md", exportFileName(r, "md", ZoneId.of("UTC")))
     }
 
     @Test

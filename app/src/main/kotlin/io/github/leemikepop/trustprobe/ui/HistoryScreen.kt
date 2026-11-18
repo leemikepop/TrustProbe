@@ -28,7 +28,7 @@ import java.util.Date
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HistoryScreen(vm: TrustProbeViewModel) {
-    val sessions by vm.sessions.collectAsStateWithLifecycle(initialValue = null)
+    val sessions by vm.sessions.collectAsStateWithLifecycle()
     val rows: List<SessionEntity>? = sessions
 
     Scaffold(
