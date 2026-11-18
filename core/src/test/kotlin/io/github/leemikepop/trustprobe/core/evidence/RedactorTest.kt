@@ -28,8 +28,8 @@ class RedactorTest {
     }
 
     @Test
-    fun keepsKeyWithoutEqualsAndDropsFragment() {
-        assertEquals("/a?flag&k=abcd…", Redactor.path("/a?flag&k=abcdefgh#secret"))
+    fun masksBareQueryPartAndDropsFragment() {
+        assertEquals("/a?…&k=abcd…", Redactor.path("/a?flag&k=abcdefgh#secret"))
         assertEquals("/a", Redactor.path("/a#frag"))
     }
 

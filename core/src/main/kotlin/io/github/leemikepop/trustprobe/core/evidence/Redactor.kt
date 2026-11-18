@@ -31,7 +31,7 @@ object Redactor {
         if (q == -1) return target
         val query = target.substring(q + 1).split('&').joinToString("&") { part ->
             val eq = part.indexOf('=')
-            if (eq == -1) part else part.substring(0, eq + 1) + value(part.substring(eq + 1))
+            if (eq == -1) value(part) else part.substring(0, eq + 1) + value(part.substring(eq + 1))
         }
         return target.substring(0, q + 1) + query
     }
