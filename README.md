@@ -11,7 +11,7 @@
 ## The problem
 
 Apps that validate TLS certificates wrongly (a `TrustManager` that accepts everything, a `HostnameVerifier` that always returns true; CWE-295) let anyone on the same Wi-Fi read credentials and tokens. The Okara study (arXiv [2601.22770](https://arxiv.org/abs/2601.22770)) analysed 37,349 Android apps and found 22.42% (8,374) vulnerable to TLS man-in-the-middle attacks, with about 41% of the vulnerabilities attributed to third-party libraries.
-Existing tools tend to need root, a proxy or router you control, or an external server, or they are no longer maintained.
+Earlier tools each needed something extra: Marvin needs root and instrumentation, nogotofail needs a router or gateway you control (and is archived), Okara is a research pipeline built on an external server and cloud emulators, and jsparber/interceptor is an unmaintained prototype.
 
 TrustProbe is one APK. Pick an app on your own phone, start a time-boxed session, use that app for a few minutes, and get a report with one verdict per host name and evidence for each.
 
@@ -38,11 +38,11 @@ Modules: `:core` (pure Kotlin/JVM: SOCKS5 server, ClientHello parser, certificat
 
 ## Design decisions
 
-- **No mitmproxy, no Python layer.** Deciding "did the client validate?" only needs the server side of one handshake. Dropping a decrypting proxy removes an interpreter, a large dependency tree and the most failure-prone part of such tools; the native code in the APK is about 350 KB per ABI (hev) and there is no Python runtime.
+- **No mitmproxy, no Python layer.** Deciding "did the client validate?" only needs the server side of one handshake. Dropping a decrypting proxy removes an interpreter, a large dependency tree and a lot of moving parts; the native code in the APK is about 350 KB per ABI (hev) and there is no Python runtime.
 - **A single-app VPN.** Attribution is by construction, not by heuristics, and a tested app that correctly rejects the forged certificate only breaks for that one app and only for the session. Sessions are time-boxed (default 5 minutes) for the same reason.
-- **Adaptive, T2-first schedule.** Many correct apps give up after one refusal, so TrustProbe cannot assume three attempts. Per host name it runs `T2_UNTRUSTED_CA` first (closest to a real attacker, and alone answers "is the chain checked?"). If rejected, `T1_SELF_SIGNED` runs next on a retry; if accepted, `T3_WRONG_HOST` runs next to gauge severity. After that the host is forwarded untouched so the app recovers. Each case runs at most once; verdicts count only the cases that actually ran, and the report lists them.
+- **Adaptive, T2-first schedule.** Many correct apps give up after one refusal, so TrustProbe cannot assume three attempts. Per host name it runs `T2_UNTRUSTED_CA` first (closest to a real attacker, and alone answers "is the chain checked?"). If rejected, `T1_SELF_SIGNED` runs next on a retry; if accepted, `T3_WRONG_HOST` runs next to gauge severity. After that the host is forwarded untouched so the app recovers. Each case yields at most one decisive result (a timed-out or errored attempt is retried once); verdicts count only the cases that actually ran, and the report lists them.
 - **Verdicts are recomputed from events.** The engine only emits an append-only log of what happened (`Probed`, `Forwarded`, `QuicDropped`). Verdicts are a pure function of that log, so the live screen, the saved report, the history view and the exports always agree, and the verdict logic is tested without any network.
-- **Masking by default.** Header values and query values are reduced to their first 4 characters plus `…` and a length (`Authorization: Bear… (len 212)`), body content is never recorded, and unmasked content exists only in memory for the current session and is never stored or exported.
+- **Masking by default.** Header values and query values are reduced to their first 4 characters plus `…` and a length (for example `Authorization: Bear… (length 212)`; values of 4 characters or fewer are masked completely), body content is never recorded, and unmasked content exists only in memory for the current session and is never stored or exported.
 - **Hardened local proxy.** The SOCKS5 server listens on 127.0.0.1 with per-session random credentials, so other apps on the device cannot use it to bypass the VPN.
 
 ## Test cases and verdict rules
@@ -61,7 +61,7 @@ Per host name:
 - **PASS**: T2 was clearly rejected (alert, close during the handshake, or close right after it without sending data). The report notes when T1 was not run. Apps that pin certificates also land here, which is correct.
 - **INCONCLUSIVE**: no connections, only timeouts or errors, or no SNI (so no correct-name certificate can be made). The reason is stated.
 
-The app-level result is the worst host verdict.
+The app-level result is VULNERABLE if any host is; otherwise PASS if at least one host passed; otherwise INCONCLUSIVE (hosts without a decisive result do not downgrade a PASS).
 
 ## Results
 
@@ -70,15 +70,16 @@ The in-repo testbed has four HTTPS clients with known behaviour. All figures bel
 | Metric | emulator (API 37, x86_64) | Pixel 7 (real device) |
 |---|---|---|
 | Testbed verdicts correct | 4/4 (also asserted in CI on an API 35 emulator) | pending |
-| "Run all" to all four hosts done (median of 3) | 3.8 s | pending |
+| Testbed launch (autorun) to all four hosts tested, including app cold start and retries (median of 3) | 3.8 s | pending |
 | Probe duration, `Probed.result.durationMs` (median of 24) | 9 ms (rejected 6 ms; accepted 219 ms, which includes waiting for the first request) | pending |
-| CORRECT request time, no TrustProbe vs. forward mode (median of 20 each) | 521 / 548 ms vs. 441 ms: no measurable overhead beyond emulator noise | pending |
+| Testbed `elapsedMs` for one OkHttp request to the CORRECT host: no TrustProbe vs. forward mode (median of 20 each) | 521 / 548 ms (two blocks) vs. 441 ms (one session, n = 20). Emulator noise exceeds any effect, so this shows no detectable slowdown, not that forwarding is free or faster | pending |
 | Release APK size (unsigned, no R8, arm64-v8a + x86_64) | 31.9 MB | pending |
 
 Testbed ground truth: `CORRECT` (default OkHttp) PASS; `TRUST_ALL` (trust-everything manager and host name verifier) VULNERABLE / `ACCEPTS_ANY_CERT`; `HOSTNAME_VERIFIER_ALWAYS_TRUE` (chain still checked) PASS in v1; `PINNED` PASS.
 
 ## Limitations
 
+- **Only TCP 443 is probed.** Other ports are forwarded untested, and connections without SNI are forwarded, not probed.
 - **QUIC is dropped.** UDP 443 is discarded so apps fall back to TLS over TCP; HTTP/3-only traffic is not tested.
 - **No SNI means INCONCLUSIVE.** Without a server name no certificate with the right name can be made.
 - **A valid chain with the wrong host name is not detectable in v1.** That bug needs a certificate the device trusts for another name (planned `T4`). The testbed's `HOSTNAME_VERIFIER_ALWAYS_TRUE` client is PASS today on purpose.
@@ -109,7 +110,7 @@ Requirements: JDK 17+ (CI uses 21), Android SDK platform 37, NDK `30.0.14904198`
   -Pandroid.testInstrumentationRunnerArguments.class=io.github.leemikepop.trustprobe.e2e.TestbedVerdictsTest
 ```
 
-CI (`.github/workflows/ci.yml`) runs the build, unit tests and lint on every push, and the end-to-end test on an emulator for pushes to `main`.
+CI (`.github/workflows/ci.yml`) runs the build, unit tests and lint on every push and pull request, and the end-to-end test on an API 35 emulator for pushes to `main` and manual runs.
 
 ## Roadmap
 
