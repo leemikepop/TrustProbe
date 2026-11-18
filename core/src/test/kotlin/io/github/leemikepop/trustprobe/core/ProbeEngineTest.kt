@@ -349,6 +349,80 @@ class ProbeEngineTest {
     }
 
     @Test
+    fun probeFinishingAfterStopBeganIsNotReported() {
+        val upstream = startUpstream()
+        val proxy = startEngine(upstream)
+        val s = socksConnect(proxy, upstream)
+        s.getOutputStream().write(clientHello("late.example.test"))
+        s.getOutputStream().flush()
+        // Our flight (ServerHello + bad certificate) arrives: the probe now waits for the client.
+        s.soTimeout = 5_000
+        assertTrue(s.getInputStream().read(ByteArray(1024)) > 0)
+
+        engine!!.stop()
+        s.close() // the peer's EOF, as when the tunnel closes its side after stop() began
+
+        assertNull(events.poll(1, TimeUnit.SECONDS))
+        assertTrue(plaintexts.isEmpty())
+    }
+
+    @Test
+    fun hostDoneIsReportedOncePerHost() {
+        val upstream = startUpstream()
+        val proxy = startEngine(upstream)
+        repeat(2) {
+            request(tlsClient(proxy, upstream, "done.example.test", trustAll))
+            assertTrue(nextEvent() is EngineEvent.Probed)
+        }
+
+        repeat(3) {
+            assertEquals(String(UPSTREAM_REPLY), request(tlsClient(proxy, upstream, "done.example.test", trustAll)))
+        }
+        val e = nextEvent() as EngineEvent.Forwarded
+
+        assertEquals(ForwardReason.HOST_DONE, e.reason)
+        assertNull(events.poll(500, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun noSniIsReportedOncePerDestination() {
+        val upstream = startUpstream()
+        val proxy = startEngine(upstream)
+
+        repeat(2) {
+            assertEquals(String(UPSTREAM_REPLY), request(tlsClient(proxy, upstream, sni = null, trust = trustAll)))
+        }
+        val e = nextEvent() as EngineEvent.Forwarded
+
+        assertEquals(ForwardReason.NO_SNI, e.reason)
+        assertNull(events.poll(500, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun notTlsIsReportedOncePerDestination() {
+        val upstream = ServerSocket(0, 50, InetAddress.getLoopbackAddress()).also { closeables += it }
+        thread(isDaemon = true) {
+            while (!upstream.isClosed) {
+                val c = runCatching { upstream.accept() }.getOrNull() ?: break
+                thread(isDaemon = true) { runCatching { c.use { it.getInputStream().readBytes() } } }
+            }
+        }
+        val proxy = startEngine(upstream.localPort)
+
+        repeat(2) {
+            val s = socksConnect(proxy, upstream.localPort)
+            s.getOutputStream().write("GET / HTTP/1.1\r\nHost: x\r\n\r\n".toByteArray())
+            s.shutdownOutput()
+            s.getInputStream().readBytes()
+            s.close()
+        }
+        val e = nextEvent() as EngineEvent.Forwarded
+
+        assertEquals(ForwardReason.NOT_TLS, e.reason)
+        assertNull(events.poll(500, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
     fun udpToQuicPortIsDroppedOncePerDestination() {
         val proxy = startEngine(tlsPort = 4433)
         val ctl = socksAuthed(proxy)

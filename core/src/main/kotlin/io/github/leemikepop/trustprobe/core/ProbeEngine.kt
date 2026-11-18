@@ -28,6 +28,9 @@ import kotlinx.coroutines.CoroutineScope
  * make them thread-safe. A callback that throws never affects a connection. [onPlaintext]
  * receives the first decrypted request bytes UNREDACTED: keep them in memory only.
  *
+ * Forwarded connections are reported once per (host, reason), and dropped QUIC once per
+ * destination; every probed connection is reported.
+ *
  * [tlsPorts] are the destination ports treated as TLS (TCP) and as QUIC (UDP, dropped).
  * [connectUpstream] opens every forwarded connection, so tests can redirect upstream.
  */
@@ -44,7 +47,7 @@ class ProbeEngine(
 
     private val scheduler = TestScheduler()
     private val tlsProbe = TlsProbe(CertificateFactory(), timeouts)
-    private val nonTlsSeen = ConcurrentHashMap.newKeySet<String>()
+    private val forwardedSeen = ConcurrentHashMap.newKeySet<Pair<String, ForwardReason>>()
     private val quicSeen = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var stopped = false
 
@@ -86,7 +89,7 @@ class ProbeEngine(
 
     private fun handleNonTls(client: Socket, dst: InetSocketAddress) {
         val name = hostPort(dst)
-        if (nonTlsSeen.add(name)) emit(EngineEvent.Forwarded(name, now(), ForwardReason.NON_TLS_PORT))
+        forwardedOnce(name, ForwardReason.NON_TLS_PORT)
         forward(client, dst, ByteArray(0))
     }
 
@@ -120,7 +123,7 @@ class ProbeEngine(
         if (hello is ClientHelloResult.Complete) {
             val sni = hello.sni?.trim()?.takeIf { it.isNotEmpty() }?.lowercase()
             if (sni == null) {
-                emit(EngineEvent.Forwarded(name, now(), ForwardReason.NO_SNI))
+                forwardedOnce(name, ForwardReason.NO_SNI)
                 forward(client, dst, bytes)
             } else {
                 routeBySni(client, dst, sni, bytes)
@@ -128,7 +131,7 @@ class ProbeEngine(
         } else {
             // NotTls, an oversize hello, a timeout, or EOF: forward only if there is something to send.
             if (len == 0) return
-            emit(EngineEvent.Forwarded(name, now(), ForwardReason.NOT_TLS))
+            forwardedOnce(name, ForwardReason.NOT_TLS)
             forward(client, dst, bytes)
         }
     }
@@ -136,7 +139,7 @@ class ProbeEngine(
     private fun routeBySni(client: Socket, dst: InetSocketAddress, sni: String, bytes: ByteArray) {
         val case = scheduler.assign(sni)
         if (case == null) {
-            emit(EngineEvent.Forwarded(sni, now(), ForwardReason.HOST_DONE))
+            forwardedOnce(sni, ForwardReason.HOST_DONE)
             forward(client, dst, bytes)
             return
         }
@@ -175,6 +178,10 @@ class ProbeEngine(
             return
         }
         Relay.pipe(client, upstream)
+    }
+
+    private fun forwardedOnce(host: String, reason: ForwardReason) {
+        if (forwardedSeen.add(host to reason)) emit(EngineEvent.Forwarded(host, now(), reason))
     }
 
     private fun emit(event: EngineEvent) {
