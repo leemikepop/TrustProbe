@@ -122,6 +122,7 @@ fun ReportScreen(vm: TrustProbeViewModel) {
 @Composable
 private fun Banner(report: Report) {
     val vulnerable = report.hosts.count { it.verdict == Verdict.VULNERABLE }
+    val inconclusive = report.hosts.count { it.verdict == Verdict.INCONCLUSIVE }
     val (container, label) = when (report.appVerdict) {
         Verdict.VULNERABLE -> MaterialTheme.colorScheme.errorContainer to R.string.verdict_vulnerable
         Verdict.PASS -> MaterialTheme.colorScheme.primaryContainer to R.string.verdict_pass
@@ -131,7 +132,7 @@ private fun Banner(report: Report) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(stringResource(label), style = MaterialTheme.typography.headlineMedium)
             report.appReason?.let { Text(it.name, style = MaterialTheme.typography.titleSmall) }
-            Text(stringResource(R.string.report_summary, vulnerable, report.hosts.size))
+            Text(stringResource(R.string.report_summary, vulnerable, report.hosts.size, inconclusive))
             Text(report.packageName, style = MaterialTheme.typography.bodySmall)
         }
     }
@@ -157,6 +158,7 @@ private fun HostCard(host: HostVerdict, report: Report, vm: TrustProbeViewModel,
             )
             if (host.selfSignedUntested) Text(stringResource(R.string.report_self_signed_untested), style = MaterialTheme.typography.bodySmall)
             if (host.hostnameUntested) Text(stringResource(R.string.report_hostname_untested), style = MaterialTheme.typography.bodySmall)
+            if (host.closedAfterHandshake) Text(stringResource(R.string.report_closed_after_handshake), style = MaterialTheme.typography.bodySmall)
             if (accepted != null) {
                 val (case, evidence) = accepted
                 Text(stringResource(R.string.report_evidence), style = MaterialTheme.typography.labelLarge)

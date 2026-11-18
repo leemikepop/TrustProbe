@@ -83,8 +83,7 @@ object ReportRenderer {
         if (it.length > 20 && it.endsWith("Z") && it.contains('.')) it.substringBefore('.') + "Z" else it
     }
 
-    /** Also shown on the report screen; kept in one place so the two read the same. */
-    const val CLOSED_AFTER_HANDSHAKE_NOTE =
+    private const val CLOSED_AFTER_HANDSHAKE_NOTE =
         "handshake completed, then closed without sending data (post-handshake check such as pinning, or an idle close)"
 
     private const val MD_SPECIAL = "`*_[]#~|!()"

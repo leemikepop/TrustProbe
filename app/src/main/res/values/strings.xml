@@ -26,11 +26,12 @@
     <string name="verdict_vulnerable">VULNERABLE</string>
     <string name="verdict_pass">PASS</string>
     <string name="verdict_inconclusive">INCONCLUSIVE</string>
-    <string name="report_summary">%1$d of %2$d hosts vulnerable</string>
+    <string name="report_summary">%1$d of %2$d hosts vulnerable, %3$d inconclusive</string>
     <string name="report_hosts">Hosts</string>
     <string name="report_cases">Cases run: %1$s</string>
     <string name="report_self_signed_untested">self-signed case not tested</string>
     <string name="report_hostname_untested">hostname case not tested</string>
+    <string name="report_closed_after_handshake">handshake completed, then closed without sending data (post-handshake check such as pinning, or an idle close)</string>
     <string name="report_evidence">Evidence (first request, masked)</string>
     <string name="report_show_full">Show full content</string>
     <string name="report_hide_full">Hide full content</string>
