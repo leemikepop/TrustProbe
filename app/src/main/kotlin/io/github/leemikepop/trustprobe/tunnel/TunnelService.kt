@@ -23,6 +23,9 @@ import io.github.leemikepop.trustprobe.session.SessionState
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Per-app VPN: only the app under test is routed into the tun, which hev-socks5-tunnel turns into
@@ -138,6 +141,7 @@ class TunnelService : VpnService() {
             finish("tunnel failed to start")
             return
         }
+        _tunnelUp.value = true
         registerPackageRemoved()
         main.postDelayed(timeLimit, (endsAt - System.currentTimeMillis()).coerceAtLeast(0))
         main.postDelayed(hevCheck, HEV_CHECK_DELAY_MS)
@@ -148,6 +152,7 @@ class TunnelService : VpnService() {
     /** Stops hev, closes the tun fd, then ends the session if this instance owns it. Idempotent. */
     private fun finish(reason: String) {
         finished = true
+        _tunnelUp.value = false
         main.removeCallbacks(timeLimit)
         main.removeCallbacks(hevCheck)
         if (receiverRegistered) {
@@ -258,6 +263,11 @@ class TunnelService : VpnService() {
         private const val NOTIFICATION_ID = 1
         private const val FALLBACK_DNS = "1.1.1.1"
         private const val HEV_CHECK_DELAY_MS = 1_500L
+
+        private val _tunnelUp = MutableStateFlow(false)
+
+        /** True while the tun is established and hev is running; lets in-process tests wait for readiness. */
+        val tunnelUp: StateFlow<Boolean> = _tunnelUp.asStateFlow()
 
         /**
          * Starts the VPN for [packageName] into the engine at [socksPort]. The caller has already

@@ -23,6 +23,7 @@ jobs:
         run: ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug :testbed:assembleDebug lint
 
   e2e:
+    needs: build
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -50,10 +51,13 @@ jobs:
           target: google_apis
           disable-animations: true
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -dns-server 8.8.8.8
-          script: ./gradlew :testbed:installDebug :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=io.github.leemikepop.trustprobe.e2e.TestbedVerdictsTest
+          script: sh .github/scripts/e2e.sh
       - name: Upload instrumentation reports
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-reports
-          path: app/build/reports/androidTests/
+          path: |
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
+            e2e-diagnostics/
