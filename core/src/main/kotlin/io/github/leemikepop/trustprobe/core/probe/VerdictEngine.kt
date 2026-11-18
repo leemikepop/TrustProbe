@@ -31,11 +31,13 @@ object VerdictEngine {
                     ProbeCase.T3_WRONG_HOST !in casesRun,
             )
         }
-        if (decisive.any { it.case == ProbeCase.T2_UNTRUSTED_CA }) {
+        val decidingT2 = decisive.firstOrNull { it.case == ProbeCase.T2_UNTRUSTED_CA }
+        if (decidingT2 != null) {
             return HostVerdict(
                 host, Verdict.PASS, null, null, casesRun,
                 selfSignedUntested = ProbeCase.T1_SELF_SIGNED !in casesRun,
                 hostnameUntested = false,
+                closedAfterHandshake = decidingT2.rejectStage == RejectStage.CLOSED_AFTER_HANDSHAKE,
             )
         }
         val reason = when {

@@ -16,6 +16,30 @@ class VerdictEngineTest {
     private val acc = OutcomeKind.ACCEPTED
     private val rej = OutcomeKind.REJECTED
 
+    private fun rejected(case: ProbeCase, stage: RejectStage) =
+        ProbeResult(case, rej, stage, null, null, null, 0)
+
+    @Test
+    fun passByCloseAfterHandshakeIsNoted() {
+        val v = VerdictEngine.host("h", listOf(rejected(t2, RejectStage.CLOSED_AFTER_HANDSHAKE), rejected(t1, RejectStage.ALERT_OR_CLOSE_DURING_HANDSHAKE)))
+        assertEquals(Verdict.PASS, v.verdict)
+        assertTrue(v.closedAfterHandshake)
+    }
+
+    @Test
+    fun passByHandshakeRejectionIsNotNoted() {
+        val v = VerdictEngine.host("h", listOf(rejected(t2, RejectStage.ALERT_OR_CLOSE_DURING_HANDSHAKE), rejected(t1, RejectStage.CLOSED_AFTER_HANDSHAKE)))
+        assertEquals(Verdict.PASS, v.verdict)
+        assertFalse(v.closedAfterHandshake)
+    }
+
+    @Test
+    fun vulnerableIsNeverNotedAsClosedAfterHandshake() {
+        val v = VerdictEngine.host("h", listOf(rejected(t2, RejectStage.CLOSED_AFTER_HANDSHAKE), r(t1, acc)))
+        assertEquals(Verdict.VULNERABLE, v.verdict)
+        assertFalse(v.closedAfterHandshake)
+    }
+
     @Test
     fun t2AndT3AcceptedIsAnyCert() {
         val v = VerdictEngine.host("h", listOf(r(t2, acc), r(t3, acc)))

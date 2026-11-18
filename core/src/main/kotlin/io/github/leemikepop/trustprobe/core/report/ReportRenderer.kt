@@ -19,9 +19,10 @@ object ReportRenderer {
         appendLine()
         val seconds = maxOf(0L, r.endedAt - r.startedAt) / 1000
         val vulnerable = r.hosts.count { it.verdict == Verdict.VULNERABLE }
+        val inconclusive = r.hosts.count { it.verdict == Verdict.INCONCLUSIVE }
         val verdict = r.appVerdict.name + (r.appReason?.let { " (${it.name})" } ?: "")
         appendLine(
-            "Package ${md(r.packageName)}: **$verdict**, $vulnerable of ${r.hosts.size} hosts vulnerable. " +
+            "Package ${md(r.packageName)}: **$verdict**, $vulnerable of ${r.hosts.size} hosts vulnerable, $inconclusive inconclusive. " +
                 "Started ${iso(r.startedAt)}, ended ${iso(r.endedAt)} (${seconds}s).",
         )
         appendLine()
@@ -32,6 +33,7 @@ object ReportRenderer {
             val notes = listOfNotNull(
                 "self-signed untested".takeIf { h.selfSignedUntested },
                 "hostname untested".takeIf { h.hostnameUntested },
+                CLOSED_AFTER_HANDSHAKE_NOTE.takeIf { h.closedAfterHandshake },
             ).joinToString(", ")
             appendLine(
                 "| ${md(h.host)} | ${h.verdict.name} | $detail | " +
@@ -80,6 +82,10 @@ object ReportRenderer {
     private fun iso(ms: Long) = Instant.ofEpochMilli(ms).toString().let {
         if (it.length > 20 && it.endsWith("Z") && it.contains('.')) it.substringBefore('.') + "Z" else it
     }
+
+    /** Also shown on the report screen; kept in one place so the two read the same. */
+    const val CLOSED_AFTER_HANDSHAKE_NOTE =
+        "handshake completed, then closed without sending data (post-handshake check such as pinning, or an idle close)"
 
     private const val MD_SPECIAL = "`*_[]#~|!()"
 

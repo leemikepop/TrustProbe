@@ -4,6 +4,7 @@ import io.github.leemikepop.trustprobe.core.EngineEvent
 import io.github.leemikepop.trustprobe.core.ForwardReason
 import io.github.leemikepop.trustprobe.core.evidence.RequestEvidence
 import io.github.leemikepop.trustprobe.core.evidence.RequestEvidenceParser
+import io.github.leemikepop.trustprobe.core.probe.HostVerdict
 import io.github.leemikepop.trustprobe.core.probe.InconclusiveReason
 import io.github.leemikepop.trustprobe.core.probe.OutcomeKind
 import io.github.leemikepop.trustprobe.core.probe.ProbeCase
@@ -48,6 +49,42 @@ class ReportRendererTest {
         assertEquals(2, report.hosts.size)
         assertEquals(Verdict.PASS, report.appVerdict)
         assertTrue(ReportRenderer.markdown(report).contains("Not tested: 1 non-TLS connections, 1 QUIC flows dropped"))
+    }
+
+    @Test
+    fun passByCloseAfterHandshakeHasANote() {
+        val closed = result(ProbeCase.T2_UNTRUSTED_CA, OutcomeKind.REJECTED).copy(rejectStage = RejectStage.CLOSED_AFTER_HANDSHAKE)
+        val report = build(
+            listOf(
+                EngineEvent.Probed("pinned.example.com", 1, closed),
+                probed("plain.example.com", 2, ProbeCase.T2_UNTRUSTED_CA, OutcomeKind.REJECTED),
+            ),
+        )
+        assertEquals(listOf(true, false), report.hosts.map { it.closedAfterHandshake })
+        val rows = ReportRenderer.markdown(report).lines().filter { it.startsWith("| ") && it.contains("example.com") }
+        val note = "handshake completed, then closed without sending data (post-handshake check such as pinning, or an idle close)"
+        assertTrue(rows.single { it.contains("pinned") }.contains("| PASS |"))
+        assertTrue(rows.single { it.contains("pinned") }.contains(note))
+        assertFalse(rows.single { it.contains("plain") }.contains(note))
+    }
+
+    @Test
+    fun storedHostVerdictWithoutTheNoteStillDecodes() {
+        val old = """{"host":"a.com","verdict":"PASS","severity":null,"reason":null,"casesRun":["T2_UNTRUSTED_CA"],"selfSignedUntested":true,"hostnameUntested":false}"""
+        assertFalse(Json.decodeFromString(HostVerdict.serializer(), old).closedAfterHandshake)
+    }
+
+    @Test
+    fun summaryCountsInconclusiveHosts() {
+        val report = build(
+            listOf(
+                probed("v.com", 1, ProbeCase.T2_UNTRUSTED_CA, OutcomeKind.ACCEPTED),
+                probed("p.com", 2, ProbeCase.T2_UNTRUSTED_CA, OutcomeKind.REJECTED),
+                probed("i.com", 3, ProbeCase.T2_UNTRUSTED_CA, OutcomeKind.TIMEOUT),
+                EngineEvent.Forwarded("10.0.0.1:443", 4, ForwardReason.NO_SNI),
+            ),
+        )
+        assertTrue(ReportRenderer.markdown(report).contains("**VULNERABLE**, 1 of 4 hosts vulnerable, 2 inconclusive."))
     }
 
     @Test

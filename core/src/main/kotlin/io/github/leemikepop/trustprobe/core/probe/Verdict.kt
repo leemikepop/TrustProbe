@@ -8,6 +8,11 @@ enum class Severity { ACCEPTS_ANY_CERT, NO_CHAIN_VALIDATION, ACCEPTS_SELF_SIGNED
 
 enum class InconclusiveReason { NO_CONNECTIONS, NO_SNI, TIMEOUT, ERROR }
 
+/**
+ * [closedAfterHandshake] is set on a PASS whose deciding T2 rejection was a close right after a
+ * completed handshake (pinning or another post-handshake check, or an idle close). It defaults to
+ * false so JSON written before it existed still decodes.
+ */
 @Serializable
 data class HostVerdict(
     val host: String,
@@ -17,4 +22,5 @@ data class HostVerdict(
     val casesRun: List<ProbeCase>,
     val selfSignedUntested: Boolean,
     val hostnameUntested: Boolean,
+    val closedAfterHandshake: Boolean = false,
 )
