@@ -10,6 +10,7 @@ object Socks5Codec {
     const val VERSION = 5
     const val CMD_CONNECT = 0x01
     const val CMD_UDP_ASSOCIATE = 0x03
+    const val METHOD_USER_PASS = 0x02
     const val REP_OK = 0x00
     const val REP_COMMAND_NOT_SUPPORTED = 0x07
     const val REP_ADDRESS_TYPE_NOT_SUPPORTED = 0x08
@@ -24,13 +25,22 @@ object Socks5Codec {
     /** Thrown for a request whose address type is unknown; carries the reply code to send. */
     class UnsupportedAddressType : java.io.IOException("unsupported address type")
 
-    /** Reads the method-selection message; returns true if "no authentication" (0x00) is offered. */
-    fun readGreeting(input: InputStream): Boolean {
+    /** Reads the method-selection message; returns the offered method codes. */
+    fun readGreeting(input: InputStream): List<Int> {
         val d = DataInputStream(input)
         require(d.readUnsignedByte() == VERSION) { "not SOCKS5" }
         val methods = ByteArray(d.readUnsignedByte())
         d.readFully(methods)
-        return methods.any { it.toInt() == 0 }
+        return methods.map { it.toInt() and 0xFF }
+    }
+
+    /** Reads an RFC 1929 username/password sub-negotiation request. */
+    fun readAuth(input: InputStream): Pair<ByteArray, ByteArray> {
+        val d = DataInputStream(input)
+        require(d.readUnsignedByte() == 1) { "bad auth version" }
+        val user = ByteArray(d.readUnsignedByte()).also(d::readFully)
+        val pass = ByteArray(d.readUnsignedByte()).also(d::readFully)
+        return user to pass
     }
 
     fun readRequest(input: InputStream): Request {
