@@ -40,7 +40,7 @@ class ReportRendererTest {
                 EngineEvent.QuicDropped("quic.example.com", 4),
             ),
         )
-        assertEquals(listOf("api.example.com", "10.0.0.1"), report.hosts.map { it.host }.sortedBy { it != "api.example.com" })
+        assertEquals(listOf("10.0.0.1", "api.example.com"), report.hosts.map { it.host })
         val noSni = report.hosts.single { it.host == "10.0.0.1" }
         assertEquals(Verdict.INCONCLUSIVE, noSni.verdict)
         assertEquals(InconclusiveReason.NO_SNI, noSni.reason)
@@ -115,8 +115,99 @@ class ReportRendererTest {
     fun markdownEscapesTableCells() {
         val md = ReportRenderer.markdown(build(listOf(probed("evil|host\nname.com", 1, ProbeCase.T2_UNTRUSTED_CA, OutcomeKind.REJECTED)), "Ap|p\nX"))
         assertTrue(md.contains("| evil\\|host name.com | PASS |"))
-        assertTrue(md.lines().first() == "# TrustProbe report: Ap|p X")
+        assertEquals("# TrustProbe report: Ap\\|p X", md.lines().first())
         val row = md.lines().single { it.startsWith("| evil") }
         assertEquals(6, row.replace("\\|", "").count { it == '|' })
+    }
+
+    @Test
+    fun markdownNeutralisesInjection() {
+        val nasty = "<img src=x onerror=alert(1)>`code`[a](http://evil) # end\\"
+        val ev = RequestEvidence(
+            "HTTP/1.1", nasty, nasty, "# $nasty",
+            listOf(io.github.leemikepop.trustprobe.core.evidence.RedactedHeader(nasty, nasty, 5)), 10,
+        )
+        val md = ReportRenderer.markdown(
+            build(listOf(probed(nasty, 1, ProbeCase.T3_WRONG_HOST, OutcomeKind.ACCEPTED, ev)), nasty),
+        )
+        assertFalse(md.contains("<img"))
+        assertFalse(md.contains("](http"))
+        assertFalse(md.contains(" "))
+        assertFalse(Regex("(?<!\\\\)`").containsMatchIn(md))
+        assertFalse(md.lines().any { it.startsWith("# ") && !it.startsWith("# TrustProbe report: ") })
+        val rows = md.lines().filter { it.startsWith("| ") }
+        assertEquals(3, rows.size)
+        for (row in rows) assertEquals(6, row.replace("\\\\", "").replace("\\|", "").count { it == '|' })
+    }
+
+    @Test
+    fun detailIsCappedAndNotRendered() {
+        val detail = "a".repeat(500) + "\n" + "b".repeat(500)
+        val r = result(ProbeCase.T2_UNTRUSTED_CA, OutcomeKind.ERROR).copy(detail = detail)
+        val report = build(listOf(EngineEvent.Probed("h.com", 1, r)))
+        val decoded = Json.decodeFromString(Report.serializer(), ReportRenderer.json(report))
+        val got = (decoded.events.single() as EngineEvent.Probed).result.detail!!
+        assertTrue(got.length <= 200)
+        assertTrue(got.none { it < ' ' })
+        assertFalse(ReportRenderer.markdown(report).contains("aaaaaaaaaa"))
+    }
+
+    @Test
+    fun outOfOrderEventsAreSortedBeforeVerdicts() {
+        fun ev(path: String) = RequestEvidenceParser.parse("GET $path HTTP/1.1\r\nHost: h.com\r\n\r\n".toByteArray())
+        val report = build(
+            listOf(
+                probed("h.com", 5, ProbeCase.T3_WRONG_HOST, OutcomeKind.ACCEPTED, ev("/late")),
+                probed("h.com", 1, ProbeCase.T1_SELF_SIGNED, OutcomeKind.ACCEPTED, ev("/early")),
+                probed("h.com", 3, ProbeCase.T2_UNTRUSTED_CA, OutcomeKind.REJECTED),
+            ),
+        )
+        assertEquals(
+            listOf(ProbeCase.T1_SELF_SIGNED, ProbeCase.T2_UNTRUSTED_CA, ProbeCase.T3_WRONG_HOST),
+            report.hosts.single().casesRun,
+        )
+        assertEquals(listOf(1L, 3L, 5L), report.events.map { it.atMillis })
+        val md = ReportRenderer.markdown(report)
+        assertTrue(md.contains("- Path: /early"))
+        assertFalse(md.contains("/late"))
+    }
+
+    @Test
+    fun evidenceSkipsAcceptedResultsWithoutEvidence() {
+        val ev = RequestEvidenceParser.parse("GET /second HTTP/1.1\r\nHost: h.com\r\n\r\n".toByteArray())
+        val md = ReportRenderer.markdown(
+            build(
+                listOf(
+                    probed("h.com", 1, ProbeCase.T1_SELF_SIGNED, OutcomeKind.ACCEPTED, null),
+                    probed("h.com", 2, ProbeCase.T2_UNTRUSTED_CA, OutcomeKind.ACCEPTED, ev),
+                ),
+            ),
+        )
+        assertTrue(md.contains("- Path: /second"))
+    }
+
+    @Test
+    fun notTestedCountsDistinctHostsWithoutVerdict() {
+        val md = ReportRenderer.markdown(
+            build(
+                listOf(
+                    EngineEvent.Forwarded("x.com", 1, ForwardReason.NOT_TLS),
+                    EngineEvent.Forwarded("x.com", 2, ForwardReason.NOT_TLS),
+                    EngineEvent.Forwarded("y.com", 3, ForwardReason.NON_TLS_PORT),
+                    EngineEvent.QuicDropped("x.com", 4),
+                    EngineEvent.QuicDropped("q.com", 5),
+                    probed("p.com", 6, ProbeCase.T2_UNTRUSTED_CA, OutcomeKind.REJECTED),
+                    EngineEvent.Forwarded("p.com", 7, ForwardReason.NOT_TLS),
+                    EngineEvent.QuicDropped("p.com", 8),
+                ),
+            ),
+        )
+        assertTrue(md.contains("Not tested: 2 non-TLS connections, 2 QUIC flows dropped"))
+    }
+
+    @Test
+    fun negativeDurationIsClampedToZero() {
+        val md = ReportRenderer.markdown(ReportBuilder.build("p", "L", 5_000, 1_000, emptyList()))
+        assertTrue(md.contains("(0s)"))
     }
 }

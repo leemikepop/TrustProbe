@@ -31,7 +31,7 @@ object ReportBuilder {
         endedAt: Long,
         events: List<EngineEvent>,
     ): Report {
-        val ordered = events.sortedBy { it.atMillis } // stable
+        val ordered = events.sortedBy { it.atMillis }.map(::capDetail) // stable
         val results = LinkedHashMap<String, MutableList<ProbeResult>>()
         val noSni = HashSet<String>()
         for (e in ordered) {
@@ -45,6 +45,16 @@ object ReportBuilder {
             .map { VerdictEngine.host(it, results[it].orEmpty(), it in noSni) }
             .sortedWith(compareBy({ VERDICT_ORDER.indexOf(it.verdict) }, { it.host }))
         val (verdict, reason) = VerdictEngine.app(hosts)
-        return Report(packageName, appLabel, startedAt, endedAt, verdict, reason, hosts, events)
+        return Report(packageName, appLabel, startedAt, endedAt, verdict, reason, hosts, ordered)
+    }
+
+    private const val MAX_DETAIL = 200
+
+    /** `detail` is exception text kept for the JSON export only: bound it and strip control chars. */
+    private fun capDetail(e: EngineEvent): EngineEvent {
+        if (e !is EngineEvent.Probed) return e
+        val d = e.result.detail ?: return e
+        val clean = d.take(MAX_DETAIL).map { if (it < ' ' || it == '\u007F') ' ' else it }.joinToString("")
+        return e.copy(result = e.result.copy(detail = clean))
     }
 }
