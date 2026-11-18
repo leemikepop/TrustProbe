@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Debug-only trigger. VPN consent must already be granted
@@ -30,16 +31,31 @@ class DebugSessionActivity : Activity() {
         when {
             pkg == null -> Log.w(TAG, "missing --es package")
             VpnService.prepare(this) != null -> Log.w(TAG, "VPN consent not granted")
-            else -> runCatching { begin(pkg, durationSec) }.onFailure { Log.e(TAG, "could not begin", it) }
+            else -> begin(pkg, durationSec)
         }
         finish()
     }
 
+    /** begin() blocks on the Room insert, so it runs off the main thread; the service starts from main. */
     private fun begin(pkg: String, durationSec: Int) {
+        val appContext = applicationContext
         val controller = (application as TrustProbeApp).sessionController
-        val port = controller.begin(pkg, pkg, durationSec)
-        TunnelService.start(this, pkg, port, checkNotNull(controller.credentials), durationSec)
-        logUntilFinished(controller)
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val port = controller.begin(pkg, pkg, durationSec)
+                try {
+                    withContext(Dispatchers.Main) {
+                        TunnelService.start(appContext, pkg, port, checkNotNull(controller.credentials), durationSec)
+                    }
+                } catch (e: Exception) {
+                    runCatching { controller.end() }
+                    throw e
+                }
+                logUntilFinished(controller)
+            } catch (e: Exception) {
+                Log.e(TAG, "could not begin", e)
+            }
+        }
     }
 
     private fun logUntilFinished(controller: SessionController) {

@@ -16,6 +16,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -96,6 +97,28 @@ class SessionDaoTest {
         assertEquals(Verdict.VULNERABLE, report.appVerdict)
         assertEquals(listOf(probed), report.events)
         assertNull(store.report(id + 100))
+    }
+
+    @Test
+    fun reportSeesWritesQueuedJustBefore() = runBlocking {
+        val id = store.open("com.example", "Example", 500, 60)
+        repeat(50) { store.append(id, forwarded.copy(atMillis = 2_000L + it)) }
+        store.append(id, probed)
+        store.finish(id, 7_000)
+        val report = store.report(id)!! // no close(): must flush first
+        assertEquals(51, report.events.size)
+        assertEquals(7_000L, report.endedAt)
+    }
+
+    @Test
+    fun appendAfterCloseIsANoOp() = runBlocking {
+        val id = store.open("com.example", "Example", 500, 60)
+        store.close()
+        store.append(id, probed)
+        store.finish(id, 7_000)
+        assertEquals(emptyList<EventEntity>(), db.sessionDao().events(id))
+        assertNull(db.sessionDao().sessions().first().single().endedAt)
+        assertTrue(runCatching { store.open("x", "X", 1, 1) }.exceptionOrNull() is IllegalStateException)
     }
 
     @Test

@@ -22,6 +22,6 @@ interface SessionDao {
     @Query("SELECT * FROM SessionEntity WHERE id = :id")
     suspend fun session(id: Long): SessionEntity?
 
-    @Query("SELECT * FROM EventEntity WHERE sessionId = :sessionId ORDER BY atMillis")
+    @Query("SELECT * FROM EventEntity WHERE sessionId = :sessionId ORDER BY atMillis, id")
     suspend fun events(sessionId: Long): List<EventEntity>
 }
