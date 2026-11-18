@@ -30,6 +30,7 @@ class TlsProbe(private val certs: CertificateFactory, private val timeouts: Prob
      */
     fun run(client: Socket, initial: ByteArray, sni: String, case: ProbeCase): Pair<ProbeResult, ByteArray?> {
         val start = System.nanoTime()
+        var engine: SSLEngine? = null
         var io: EngineIo? = null
         var tlsVersion: String? = null
         var completed = false
@@ -38,19 +39,23 @@ class TlsProbe(private val certs: CertificateFactory, private val timeouts: Prob
             ProbeResult(case, kind, stage, detail, tlsVersion, evidence, (System.nanoTime() - start) / 1_000_000)
 
         try {
-            val engine = newEngine(certs.materialFor(case, sni))
-            val engineIo = EngineIo(engine, client, initial).also { io = it }
+            val eng = newEngine(certs.materialFor(case, sni)).also { engine = it }
+            val engineIo = EngineIo(eng, client, initial).also { io = it }
             engineIo.handshake(timeouts.handshakeMs)
+            val session = eng.session
+            check(session.protocol != "NONE" && session.cipherSuite != "SSL_NULL_WITH_NULL_NULL") {
+                "handshake ended without a negotiated session"
+            }
             completed = true
-            tlsVersion = engine.session.protocol
+            tlsVersion = session.protocol
             val data = engineIo.firstData(timeouts.firstDataMs, MAX_FIRST_DATA)
             return result(OutcomeKind.ACCEPTED, null, null, RequestEvidenceParser.parse(data)) to data
         } catch (e: Exception) {
+            // Only once the client has our certificate can a close or engine failure be its rejection.
+            val clientSawCert = completed || io?.flightSent == true
             val kind = when (e) {
                 is SocketTimeoutException -> OutcomeKind.TIMEOUT
-                is EngineIo.PeerClosed -> OutcomeKind.REJECTED
-                // Once the client has our certificate, an engine failure is its alert (or bad record).
-                is SSLException -> if (completed || io?.flightSent == true) OutcomeKind.REJECTED else OutcomeKind.ERROR
+                is EngineIo.PeerClosed, is SSLException -> if (clientSawCert) OutcomeKind.REJECTED else OutcomeKind.ERROR
                 else -> OutcomeKind.ERROR
             }
             val stage = when {
@@ -60,6 +65,7 @@ class TlsProbe(private val certs: CertificateFactory, private val timeouts: Prob
             }
             return result(kind, stage, e.message ?: e.javaClass.name, null) to null
         } finally {
+            engine?.let { runCatching { it.closeOutbound() }; runCatching { it.closeInbound() } }
             runCatching { client.close() }
         }
     }
@@ -69,9 +75,16 @@ class TlsProbe(private val certs: CertificateFactory, private val timeouts: Prob
         context.init(arrayOf(SingleKeyManager(material)), null, null)
         return context.createSSLEngine().apply {
             useClientMode = false
-            // "" means no ALPN; null would abort the handshake.
-            handshakeApplicationProtocolSelector =
-                BiFunction { _, offered -> if (HTTP_1_1 in offered) HTTP_1_1 else "" }
+            // Prefer http/1.1, else agree to whatever the client wants first (an h2-only client
+            // given no ALPN would close on its own and look like a rejection). "" means no
+            // ALPN; null would abort the handshake.
+            handshakeApplicationProtocolSelector = BiFunction { _, offered ->
+                when {
+                    HTTP_1_1 in offered -> HTTP_1_1
+                    offered.isNotEmpty() -> offered.first()
+                    else -> ""
+                }
+            }
         }
     }
 

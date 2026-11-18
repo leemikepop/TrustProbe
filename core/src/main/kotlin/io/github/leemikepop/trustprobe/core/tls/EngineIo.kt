@@ -15,7 +15,8 @@ import javax.net.ssl.SSLEngineResult.Status
  * read from the socket) is unwrapped before anything else is read.
  *
  * Throws [PeerClosed] when the peer ends the connection, [SocketTimeoutException] when it goes
- * quiet, and the engine's own [javax.net.ssl.SSLException]s (e.g. a received fatal alert).
+ * quiet, [IllegalStateException] ("closed locally") when our side closed the socket, and the
+ * engine's own [javax.net.ssl.SSLException]s (e.g. a received fatal alert).
  */
 internal class EngineIo(private val engine: SSLEngine, private val socket: Socket, initial: ByteArray) {
     /** The peer ended the connection: EOF, reset, or close_notify. */
@@ -61,13 +62,18 @@ internal class EngineIo(private val engine: SSLEngine, private val socket: Socke
     fun firstData(timeoutMs: Long, cap: Int): ByteArray {
         deadlineNanos = System.nanoTime() + timeoutMs * 1_000_000
         while (true) {
+            // The unwrap that completed the handshake may already have produced data.
+            if (appIn.position() > 0) return appIn.array().copyOf(minOf(appIn.position(), cap))
             when (engine.handshakeStatus) {
                 HandshakeStatus.NEED_TASK -> { runTasks(); continue }
-                HandshakeStatus.NEED_WRAP -> { wrap(); continue }
+                HandshakeStatus.NEED_WRAP -> {
+                    // Failing to send a ticket must not hide a request that is already buffered.
+                    try { wrap() } catch (_: PeerClosed) { }
+                    continue
+                }
                 else -> Unit
             }
             if (unwrap().status == Status.CLOSED) throw PeerClosed("close_notify after handshake")
-            if (appIn.position() > 0) return appIn.array().copyOf(minOf(appIn.position(), cap))
         }
     }
 
@@ -105,10 +111,14 @@ internal class EngineIo(private val engine: SSLEngine, private val socket: Socke
             output.write(netOut.array(), 0, netOut.position())
             output.flush()
         } catch (e: IOException) {
-            throw PeerClosed(e.message ?: "write failed")
+            throw closed(e, "write failed")
         }
         wroteAny = true
     }
+
+    /** A failed socket call is the peer's doing unless we closed the socket ourselves. */
+    private fun closed(e: IOException, fallback: String): Exception =
+        if (socket.isClosed) IllegalStateException("closed locally", e) else PeerClosed(e.message ?: fallback)
 
     private fun readMore() {
         netIn.compact()
@@ -123,7 +133,7 @@ internal class EngineIo(private val engine: SSLEngine, private val socket: Socke
         } catch (e: SocketTimeoutException) {
             throw e
         } catch (e: IOException) {
-            throw PeerClosed(e.message ?: "connection reset")
+            throw closed(e, "connection reset")
         }
         if (n < 0) throw PeerClosed("EOF")
         netIn.advance(n)
