@@ -3,11 +3,13 @@ package io.github.leemikepop.trustprobe.core
 import io.github.leemikepop.trustprobe.core.probe.OutcomeKind
 import io.github.leemikepop.trustprobe.core.probe.ProbeCase
 import io.github.leemikepop.trustprobe.core.tls.CertificateFactory
+import io.github.leemikepop.trustprobe.core.tls.ProbeTimeouts
 import java.io.DataInputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.security.KeyStore
+import java.nio.ByteBuffer
 import java.security.cert.X509Certificate
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.LinkedBlockingQueue
@@ -78,8 +80,10 @@ class ProbeEngineTest {
         return server.localPort
     }
 
-    private fun startEngine(tlsPort: Int, timeouts: io.github.leemikepop.trustprobe.core.tls.ProbeTimeouts =
-        io.github.leemikepop.trustprobe.core.tls.ProbeTimeouts(handshakeMs = 5_000, firstDataMs = 3_000)): Int {
+    private fun startEngine(
+        tlsPort: Int,
+        timeouts: ProbeTimeouts = ProbeTimeouts(handshakeMs = 5_000, firstDataMs = 3_000),
+    ): Int {
         val e = ProbeEngine(
             scope, onEvent = { events += it }, onPlaintext = { h, c, b -> plaintexts += Triple(h, c, b) },
             timeouts = timeouts, tlsPorts = setOf(tlsPort),
@@ -88,8 +92,8 @@ class ProbeEngineTest {
         return e.start()
     }
 
-    /** SOCKS5 CONNECT to 127.0.0.1:[dstPort] through the engine; returns the tunnelled raw socket. */
-    private fun socksConnect(proxyPort: Int, dstPort: Int): Socket {
+    /** Opens a connection to the engine and completes the SOCKS5 greeting and RFC 1929 auth. */
+    private fun socksAuthed(proxyPort: Int): Socket {
         val s = Socket("127.0.0.1", proxyPort).also { closeables += it; it.soTimeout = 10_000 }
         val out = s.getOutputStream()
         val inp = DataInputStream(s.getInputStream())
@@ -100,9 +104,27 @@ class ProbeEngineTest {
         val p = c.password.toByteArray()
         out.write(byteArrayOf(1, u.size.toByte()) + u + byteArrayOf(p.size.toByte()) + p)
         assertEquals(0, ByteArray(2).also(inp::readFully)[1].toInt())
-        out.write(byteArrayOf(5, 1, 0, 1, 127, 0, 0, 1, (dstPort shr 8).toByte(), dstPort.toByte()))
-        assertEquals(0, ByteArray(10).also(inp::readFully)[1].toInt())
         return s
+    }
+
+    /** SOCKS5 CONNECT to 127.0.0.1:[dstPort] through the engine; returns the tunnelled raw socket. */
+    private fun socksConnect(proxyPort: Int, dstPort: Int): Socket {
+        val s = socksAuthed(proxyPort)
+        s.getOutputStream().write(byteArrayOf(5, 1, 0, 1, 127, 0, 0, 1, (dstPort shr 8).toByte(), dstPort.toByte()))
+        assertEquals(0, ByteArray(10).also(DataInputStream(s.getInputStream())::readFully)[1].toInt())
+        return s
+    }
+
+    /** The bytes of a real TLS ClientHello carrying [sni]. */
+    private fun clientHello(sni: String): ByteArray {
+        val engine = SSLContext.getDefault().createSSLEngine().apply {
+            useClientMode = true
+            sslParameters = sslParameters.apply { serverNames = listOf(SNIHostName(sni)) }
+        }
+        engine.beginHandshake()
+        val out = ByteBuffer.allocate(engine.session.packetBufferSize)
+        engine.wrap(ByteBuffer.allocate(0), out)
+        return out.array().copyOf(out.position())
     }
 
     private fun tlsClient(
@@ -226,42 +248,112 @@ class ProbeEngineTest {
         assertNull(events.poll(500, TimeUnit.MILLISECONDS))
     }
 
-    @Test
-    fun nonTlsBytesOnTlsPortAreForwardedWithThePrefix() {
-        val upstream = ServerSocket(0, 50, InetAddress.getLoopbackAddress()).also { closeables += it }
+    /** A raw upstream that reads until EOF, records everything, and echoes it back. */
+    private fun startEchoToEof(received: LinkedBlockingQueue<ByteArray>? = null): ServerSocket {
+        val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress()).also { closeables += it }
         thread(isDaemon = true) {
             runCatching {
-                upstream.accept().use { s ->
-                    val buf = ByteArray(64)
-                    val n = s.getInputStream().read(buf)
-                    s.getOutputStream().write(buf, 0, n)
+                server.accept().use { s ->
+                    val all = s.getInputStream().readBytes()
+                    received?.add(all)
+                    s.getOutputStream().write(all)
                 }
             }
         }
+        return server
+    }
+
+    @Test
+    fun nonTlsBytesOnTlsPortAreForwardedWithTheExactPrefix() {
+        val upstream = startEchoToEof()
         val proxy = startEngine(upstream.localPort)
+        val part1 = "GET / HT".toByteArray()
+        val part2 = "TP/1.1\r\nHost: x\r\n\r\n".toByteArray()
 
         val s = socksConnect(proxy, upstream.localPort)
-        s.getOutputStream().write("GET / HTTP/1.1\r\n\r\n".toByteArray())
-        val echoed = ByteArray(18).also(DataInputStream(s.getInputStream())::readFully)
+        s.getOutputStream().write(part1)
+        s.getOutputStream().flush()
+        Thread.sleep(150)
+        s.getOutputStream().write(part2)
+        s.shutdownOutput()
+        val echoed = s.getInputStream().readBytes()
         val e = nextEvent() as EngineEvent.Forwarded
 
-        assertEquals("GET / HTTP/1.1\r\n\r\n", String(echoed))
+        assertEquals(String(part1 + part2), String(echoed))
         assertEquals(ForwardReason.NOT_TLS, e.reason)
+    }
+
+    @Test
+    fun partialTlsBytesThenEofAreForwardedAsNotTls() {
+        val received = LinkedBlockingQueue<ByteArray>()
+        val upstream = startEchoToEof(received)
+        val proxy = startEngine(upstream.localPort)
+        val partial = byteArrayOf(0x16, 0x03, 0x01, 0x00)
+
+        val s = socksConnect(proxy, upstream.localPort)
+        s.getOutputStream().write(partial)
+        s.shutdownOutput()
+        val e = nextEvent() as EngineEvent.Forwarded
+
+        assertEquals(ForwardReason.NOT_TLS, e.reason)
+        assertEquals(partial.toList(), received.poll(10, TimeUnit.SECONDS)!!.toList())
+    }
+
+    @Test
+    fun silentClientWithZeroBytesIsClosedWithoutAnEvent() {
+        val upstream = startUpstream()
+        val proxy = startEngine(upstream, ProbeTimeouts(handshakeMs = 300, firstDataMs = 300))
+
+        val s = socksConnect(proxy, upstream)
+
+        assertEquals(-1, s.getInputStream().read())
+        assertNull(events.poll(500, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun timeoutsAreReportedOnceEachThenHostIsForwarded() {
+        val upstream = startUpstream()
+        val proxy = startEngine(upstream, ProbeTimeouts(handshakeMs = 300, firstDataMs = 300))
+        val hello = clientHello("slow.example.test")
+
+        repeat(2) {
+            val s = socksConnect(proxy, upstream)
+            s.getOutputStream().write(hello)
+            s.getOutputStream().flush()
+            val e = nextEvent() as EngineEvent.Probed
+            assertEquals("slow.example.test", e.host)
+            assertEquals(ProbeCase.T2_UNTRUSTED_CA, e.result.case)
+            assertEquals(OutcomeKind.TIMEOUT, e.result.kind)
+            s.close()
+        }
+        val body = request(tlsClient(proxy, upstream, "slow.example.test", trustAll))
+        val e3 = nextEvent() as EngineEvent.Forwarded
+
+        assertEquals(ForwardReason.HOST_DONE, e3.reason)
+        assertEquals(String(UPSTREAM_REPLY), body)
+    }
+
+    @Test
+    fun stopDuringHandshakeDeliversNothingNew() {
+        val upstream = startUpstream()
+        val proxy = startEngine(upstream)
+        val s = socksConnect(proxy, upstream)
+        s.getOutputStream().write(clientHello("stop.example.test"))
+        s.getOutputStream().flush()
+        Thread.sleep(500) // the probe is now waiting for the client's handshake reply
+
+        engine!!.stop()
+
+        assertNull(events.poll(1, TimeUnit.SECONDS))
+        assertTrue(plaintexts.isEmpty())
     }
 
     @Test
     fun udpToQuicPortIsDroppedOncePerDestination() {
         val proxy = startEngine(tlsPort = 4433)
-        val ctl = Socket("127.0.0.1", proxy).also { closeables += it; it.soTimeout = 5_000 }
+        val ctl = socksAuthed(proxy)
         val out = ctl.getOutputStream()
         val inp = DataInputStream(ctl.getInputStream())
-        out.write(byteArrayOf(5, 1, 2))
-        ByteArray(2).also(inp::readFully)
-        val c = engine!!.credentials
-        val u = c.username.toByteArray()
-        val p = c.password.toByteArray()
-        out.write(byteArrayOf(1, u.size.toByte()) + u + byteArrayOf(p.size.toByte()) + p)
-        ByteArray(2).also(inp::readFully)
         out.write(byteArrayOf(5, 3, 0, 1, 0, 0, 0, 0, 0, 0))
         val rep = ByteArray(10).also(inp::readFully)
         val relayPort = ((rep[8].toInt() and 0xFF) shl 8) or (rep[9].toInt() and 0xFF)
@@ -281,16 +373,21 @@ class ProbeEngineTest {
     fun throwingCallbacksDoNotBreakConnections() {
         val upstream = startUpstream()
         val e = ProbeEngine(
-            scope, onEvent = { error("boom") }, onPlaintext = { _, _, _ -> error("boom") },
+            scope,
+            onEvent = { events += it; error("boom") },
+            onPlaintext = { h, c, b -> plaintexts += Triple(h, c, b); error("boom") },
             tlsPorts = setOf(upstream),
         ).also { engine = it }
         val proxy = e.start()
 
-        request(tlsClient(proxy, upstream, "boom.example.test", trustAll))
-        request(tlsClient(proxy, upstream, "boom.example.test", trustAll))
+        repeat(2) {
+            request(tlsClient(proxy, upstream, "boom.example.test", trustAll))
+            assertTrue(nextEvent() is EngineEvent.Probed)
+        }
         val third = request(tlsClient(proxy, upstream, "boom.example.test", trustAll))
 
         assertEquals(String(UPSTREAM_REPLY), third)
+        assertEquals(2, plaintexts.size)
     }
 
     @Test

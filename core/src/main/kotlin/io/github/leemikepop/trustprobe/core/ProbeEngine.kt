@@ -58,7 +58,10 @@ class ProbeEngine(
     /** Starts the SOCKS5 server on 127.0.0.1 and returns its port. */
     fun start(): Int = server.start()
 
-    /** Stops the server and closes open connections. Idempotent; no events are emitted afterwards. */
+    /**
+     * Stops the server and closes open connections. Idempotent. No new events or plaintext are
+     * delivered once stop() has begun; a callback already running may still finish.
+     */
     fun stop() {
         stopped = true
         server.stop()
@@ -151,7 +154,7 @@ class ProbeEngine(
         } finally {
             val finalResult = result ?: ProbeResult(case, OutcomeKind.ERROR, null, "probe aborted", null, null, elapsedMs())
             scheduler.report(sni, finalResult)
-            plaintext?.let { p -> runCatching { onPlaintext(sni, case, p) } }
+            plaintext?.let { p -> if (!stopped) runCatching { onPlaintext(sni, case, p) } }
             emit(EngineEvent.Probed(sni, now(), finalResult))
         }
     }
@@ -179,7 +182,10 @@ class ProbeEngine(
         runCatching { onEvent(event) }
     }
 
-    private fun hostPort(dst: InetSocketAddress) = "${dst.hostString}:${dst.port}"
+    private fun hostPort(dst: InetSocketAddress): String {
+        val host = dst.hostString
+        return if (host.contains(':') && !host.startsWith("[")) "[$host]:${dst.port}" else "$host:${dst.port}"
+    }
 
     private fun now() = System.currentTimeMillis()
 
