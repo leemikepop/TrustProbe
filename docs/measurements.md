@@ -66,3 +66,19 @@ the native part is two `libhev-socks5-tunnel.so` files of about 350 KB (arm64-v8
 Recorded on the same emulator with `adb shell screenrecord --time-limit 60 --size 540x1200`, driven with `adb shell input`
 (pick testbed, 2 min, Start, switch to testbed, Run all, back, Stop, report). Converted with ffmpeg
 (trimmed to 36 s, 10 fps, 360 px wide, palettegen/paletteuse) to `docs/demo.gif` (about 0.4 MB). Consent dialogs were pre-granted as above.
+
+# Pixel 7 (Android 17), 2026-11-18
+
+Real device: Pixel 7, Android 17, on home Wi-Fi (5 GHz, 192.168.31.x, IPv4 plus link-local IPv6 only, so TrustProbe did not route IPv6).
+Same methods and scripts as the emulator, with the device selected by `adb -s`. Builds: the debug TrustProbe and testbed APKs
+already installed on the phone, built from the tree at commit 9c707f2 (no rebuild for this run). Before starting, no other VPN was
+active and no always-on VPN was configured (`settings get secure always_on_vpn_app` was null). VPN consent and notification permission
+were granted for TrustProbe only; the VPN routed only the testbed package. Stay-awake was set by the device owner, not by the script.
+Both apps were force-stopped afterwards. An earlier, interrupted attempt was discarded and everything below was re-run from scratch.
+
+- (a) Correctness: 4/4 in 3 of 3 sessions (example.com PASS, example.net VULNERABLE / ACCEPTS_ANY_CERT, example.org PASS, www.example.com PASS; judged from the event logs: T2 and T1 rejected on the three correct hosts, T2 and T3 accepted on example.net, all four hosts reached `Forwarded(HOST_DONE)`).
+- (b) Testbed launch (autorun) to all four hosts tested: 3068, 2949, 3226 ms; median **3068 ms** (3.1 s). Same definition as above (includes app cold start and retries).
+- (c) `Probed.result.durationMs`, 24 results: median **15 ms**; 18 rejected: median 11 ms (7 to 21); 6 accepted: median 227 ms (217 to 237; includes waiting for the first request).
+- (d) CORRECT `elapsedMs`, 20 runs each: no TrustProbe 243.5 ms (block 1, range 164 to 334) and 245.5 ms (block 2, range 173 to 351); forward mode (one session, host already done) **331 ms** (range 131 to 344; 18 of 20 runs between 326 and 344 ms).
+  Unlike the emulator, the forward-mode runs are consistently slower: about 85 ms (roughly +35%) per fresh connection plus request, with the two baseline blocks agreeing within 2 ms. The runs include a new TCP connection, TLS handshake and DNS lookup per request, each going through the extra hops (tun, hev-socks5-tunnel, SOCKS5, upstream connect). The split between those hops was not measured, and it is one session, so treat the figure as indicative.
+- (e) APK size: same build as the emulator figure, 31.9 MB.

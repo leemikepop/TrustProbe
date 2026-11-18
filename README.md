@@ -65,15 +65,15 @@ The app-level result is VULNERABLE if any host is; otherwise PASS if at least on
 
 ## Results
 
-The in-repo testbed has four HTTPS clients with known behaviour. All figures below were measured on an emulator (API 37, x86_64); the Pixel 7 column is pending. Raw notes and how each number was taken: [`docs/measurements.md`](docs/measurements.md).
+The in-repo testbed has four HTTPS clients with known behaviour. Figures were measured on an emulator (API 37, x86_64) and on a Pixel 7; the Pixel 7 column is one Pixel 7 (Android 17) on home Wi-Fi, one run of the same methods. Raw notes and how each number was taken: [`docs/measurements.md`](docs/measurements.md).
 
 | Metric | emulator (API 37, x86_64) | Pixel 7 (real device) |
 |---|---|---|
-| Testbed verdicts correct | 4/4 (also asserted in CI on an API 35 emulator) | pending |
-| Testbed launch (autorun) to all four hosts tested, including app cold start and retries (median of 3) | 3.8 s | pending |
-| Probe duration, `Probed.result.durationMs` (median of 24) | 9 ms (rejected 6 ms; accepted 219 ms, which includes waiting for the first request) | pending |
-| Testbed `elapsedMs` for one OkHttp request to the CORRECT host: no TrustProbe vs. forward mode (median of 20 each) | 521 / 548 ms (two blocks) vs. 441 ms (one session, n = 20). Emulator noise exceeds any effect, so this shows no detectable slowdown, not that forwarding is free or faster | pending |
-| Release APK size (unsigned, no R8, arm64-v8a + x86_64) | 31.9 MB | pending |
+| Testbed verdicts correct | 4/4 (also asserted in CI on an API 35 emulator) | 4/4 in 3 of 3 sessions |
+| Testbed launch (autorun) to all four hosts tested, including app cold start and retries (median of 3) | 3.8 s | 3.1 s (3.0 / 2.9 / 3.2) |
+| Probe duration, `Probed.result.durationMs` (median of 24) | 9 ms (rejected 6 ms; accepted 219 ms, which includes waiting for the first request) | 15 ms (rejected 11 ms; accepted 227 ms, which includes waiting for the first request) |
+| Testbed `elapsedMs` for one OkHttp request to the CORRECT host: no TrustProbe vs. forward mode (median of 20 each) | 521 / 548 ms (two blocks) vs. 441 ms (one session, n = 20). Emulator noise exceeds any effect, so this shows no detectable slowdown, not that forwarding is free or faster | 244 / 246 ms (two blocks) vs. 331 ms (one session, n = 20): forward mode is consistently about 85 ms slower per fresh connection plus request on this device; the split between hops was not measured |
+| Release APK size (unsigned, no R8, arm64-v8a + x86_64) | 31.9 MB | 31.9 MB (same build) |
 
 Testbed ground truth: `CORRECT` (default OkHttp) PASS; `TRUST_ALL` (trust-everything manager and host name verifier) VULNERABLE / `ACCEPTS_ANY_CERT`; `HOSTNAME_VERIFIER_ALWAYS_TRUE` (chain still checked) PASS in v1; `PINNED` PASS.
 
@@ -86,7 +86,7 @@ Testbed ground truth: `CORRECT` (default OkHttp) PASS; `TRUST_ALL` (trust-everyt
 - **IPv6 is routed only when the underlying network has global IPv6.** Otherwise the tunnel is IPv4-only.
 - **Masking covers header values and query values only.** Path segments and query keys are kept as they are, so a secret placed in a path (`/reset/<token>`) would appear in a report. Treat reports as sensitive.
 - **Only the first request is kept as evidence** per accepted connection.
-- **Measured on an emulator so far**, on one machine with small samples. Real-device numbers are pending.
+- **Small samples.** Numbers come from one emulator and one Pixel 7 on Wi-Fi (3 sessions, one forward-mode session of 20 requests); treat them as indicative.
 - Ground truth is the testbed. Detection of known-vulnerable real-world apps has not been validated yet (see the roadmap).
 
 ## Responsible use
