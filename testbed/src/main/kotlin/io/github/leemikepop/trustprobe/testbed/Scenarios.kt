@@ -1,9 +1,12 @@
 package io.github.leemikepop.trustprobe.testbed
 
-import java.security.SecureRandom
+import android.util.Log
+import java.security.KeyStore
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -41,7 +44,7 @@ enum class Scenario(val host: String, val expected: String) {
 
 data class ScenarioRun(val attempts: Int, val success: Boolean, val elapsedMs: Long)
 
-// SPKI SHA-256 of the intermediate CA at chain index 2, "SSL.com TLS Transit ECC CA R2" (index 1,
+// Pin taken 2026-11-18. SPKI SHA-256 of the intermediate CA at chain index 2, "SSL.com TLS Transit ECC CA R2" (index 1,
 // the Cloudflare issuing CA, rotates more often). Regenerate with, and check the printed subject:
 //   echo | openssl s_client -connect www.example.com:443 -servername www.example.com -showcerts 2>/dev/null \
 //     | awk '/BEGIN CERT/{n++} n==3{print} /END CERT/&&n==3{exit}' > ca.pem
@@ -59,25 +62,34 @@ private object TrustAllManager : X509TrustManager {
     override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
 }
 
-fun clientFor(s: Scenario): OkHttpClient {
+fun clientFor(s: Scenario): OkHttpClient = clientFor(s, null)
+
+/** [pinner] overrides the PINNED scenario's pinner; tests use it to pin against a local server. */
+internal fun clientFor(s: Scenario, pinner: CertificatePinner?): OkHttpClient {
+    val defaultTrust = platformTrustManager()
+    val trust = if (s == Scenario.TRUST_ALL) TrustAllManager else defaultTrust
+    // One SSLContext per client: its session cache is per client, so no resumption across attempts.
+    val ctx = SSLContext.getInstance("TLS").apply { init(null, arrayOf<TrustManager>(trust), null) }
     val builder = OkHttpClient.Builder()
         .connectionPool(ConnectionPool(0, 1, TimeUnit.SECONDS)) // every attempt = fresh TCP+TLS
         .retryOnConnectionFailure(false)
         .connectTimeout(10, TimeUnit.SECONDS)
+        .sslSocketFactory(ctx.socketFactory, trust)
     when (s) {
         Scenario.CORRECT -> Unit
-        Scenario.TRUST_ALL -> {
-            val ctx = SSLContext.getInstance("TLS")
-            ctx.init(null, arrayOf(TrustAllManager), SecureRandom())
-            builder.sslSocketFactory(ctx.socketFactory, TrustAllManager)
-                .hostnameVerifier { _, _ -> true }
-        }
+        Scenario.TRUST_ALL -> builder.hostnameVerifier { _, _ -> true }
         Scenario.HOSTNAME_VERIFIER_ALWAYS_TRUE -> builder.hostnameVerifier { _, _ -> true }
         Scenario.PINNED -> builder.certificatePinner(
-            CertificatePinner.Builder().add(Scenario.PINNED.host, PIN_WWW_EXAMPLE_COM).build(),
+            pinner ?: CertificatePinner.Builder().add(Scenario.PINNED.host, PIN_WWW_EXAMPLE_COM).build(),
         )
     }
     return builder.build()
+}
+
+private fun platformTrustManager(): X509TrustManager {
+    val factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+    factory.init(null as KeyStore?)
+    return factory.trustManagers.filterIsInstance<X509TrustManager>().first()
 }
 
 /**
@@ -97,7 +109,8 @@ internal suspend fun attemptRequests(
         attempts++
         success = try {
             client.newCall(Request.Builder().url(url).build()).execute().use { true }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.d("TrustProbeTestbed", "attempt $attempts failed: ${e.javaClass.name}: ${e.message}")
             false
         }
     }

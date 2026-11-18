@@ -20,6 +20,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    testOptions {
+        unitTests.isReturnDefaultValues = true // android.util.Log is a no-op in JVM tests
+    }
+
     buildFeatures {
         compose = true
     }

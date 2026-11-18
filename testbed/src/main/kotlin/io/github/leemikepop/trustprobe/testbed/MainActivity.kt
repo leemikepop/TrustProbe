@@ -12,7 +12,10 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
@@ -30,12 +33,23 @@ private suspend fun runAndLog(s: Scenario): ScenarioRun {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val autorun = intent.getBooleanExtra("autorun", false)
+        // Only on a fresh launch: recreation (rotation) passes a non-null savedInstanceState.
+        val autorun = savedInstanceState == null && intent.getBooleanExtra("autorun", false)
         setContent {
             MaterialTheme {
                 val results = remember { mutableStateMapOf<Scenario, ScenarioRun>() }
                 val scope = rememberCoroutineScope()
-                suspend fun runAll() {
+                var running by remember { mutableStateOf(false) }
+                suspend fun runExclusive(block: suspend () -> Unit) {
+                    if (running) return
+                    running = true
+                    try {
+                        block()
+                    } finally {
+                        running = false
+                    }
+                }
+                suspend fun runAll() = runExclusive {
                     for (s in Scenario.entries) results[s] = runAndLog(s)
                 }
                 LaunchedEffect(Unit) {
@@ -49,9 +63,12 @@ class MainActivity : ComponentActivity() {
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text("TrustProbe Testbed")
-                    Button(onClick = { scope.launch { runAll() } }) { Text("Run all") }
+                    Button(enabled = !running, onClick = { scope.launch { runAll() } }) { Text("Run all") }
                     for (s in Scenario.entries) {
-                        Button(onClick = { scope.launch { results[s] = runAndLog(s) } }) {
+                        Button(
+                            enabled = !running,
+                            onClick = { scope.launch { runExclusive { results[s] = runAndLog(s) } } },
+                        ) {
                             Text("${s.name} (${s.host})")
                         }
                         val r = results[s]
