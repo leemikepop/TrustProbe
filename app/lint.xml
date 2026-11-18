@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- BouncyCastle ships its own permissive trust managers for its JSSE provider; TrustProbe never
+         uses them. Ignore the finding only inside those jars so real hits in our code stay visible. -->
+    <issue id="TrustAllX509TrustManager">
+        <ignore path="**/org.bouncycastle/**" />
+    </issue>
+</lint>

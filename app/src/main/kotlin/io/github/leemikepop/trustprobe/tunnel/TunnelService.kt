@@ -21,6 +21,7 @@ import io.github.leemikepop.trustprobe.TrustProbeApp
 import io.github.leemikepop.trustprobe.core.socks.Socks5Credentials
 import io.github.leemikepop.trustprobe.session.SessionState
 import java.net.Inet4Address
+import java.net.Inet6Address
 import java.net.InetAddress
 
 /**
@@ -28,17 +29,27 @@ import java.net.InetAddress
  * SOCKS5 connections to the probe engine. Runs as a foreground service (type `systemExempted`,
  * which VPN apps qualify for) so the session survives while the user is in the app under test.
  *
- * Every end path (time limit, stop action, [onRevoke], target uninstalled, [onDestroy]) goes
- * through [finish]: stop hev, close the tun fd, then end the session. All of it runs on the
- * main thread.
+ * Every end path (time limit, stop action, [onRevoke], target uninstalled, hev dying, [onDestroy])
+ * goes through [finish]: stop hev, close the tun fd, then end the session if this instance owns
+ * it. Lifecycle callbacks, the receiver and the Handler run on the main thread; [onRevoke] arrives
+ * on a binder thread and is posted to the main thread, so all of this state is main-thread only.
  */
 class TunnelService : VpnService() {
     private class Tunnel(val pfd: ParcelFileDescriptor, val target: String)
 
     private val main = Handler(Looper.getMainLooper())
     private val timeLimit = Runnable { finish("time limit reached") }
+    private val hevCheck = Runnable {
+        if (tunnel != null && !NativeTunnel.isRunning()) finish("tunnel failed to start (hev exited)")
+    }
     private var tunnel: Tunnel? = null
     private var receiverRegistered = false
+
+    /** True once this instance has validated a start against the controller's running session. */
+    private var ownsSession = false
+
+    /** Set by [finish]; a finished instance never starts another tunnel. */
+    private var finished = false
 
     private val packageRemoved = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -58,7 +69,8 @@ class TunnelService : VpnService() {
     }
 
     override fun onRevoke() {
-        finish("VPN permission revoked")
+        // Called on a binder thread: hand it to the main thread like every other end path.
+        main.post { finish("VPN permission revoked") }
     }
 
     override fun onDestroy() {
@@ -72,30 +84,42 @@ class TunnelService : VpnService() {
         val user = intent.getStringExtra(EXTRA_USERNAME)
         val pass = intent.getStringExtra(EXTRA_PASSWORD)
         val durationSec = intent.getIntExtra(EXTRA_DURATION, 0)
+        val controller = controller()
+        val running = controller.state.value as? SessionState.Running
+        val endsAt = running?.endsAt ?: (System.currentTimeMillis() + durationSec * 1_000L)
+        // startForegroundService() obliges us to call startForeground() on every start request.
         if (tunnel != null) {
+            goForeground(target.orEmpty(), endsAt)
             Log.w(TAG, "session already running; ignoring start for $target")
             return
         }
-        val running = controller().state.value as? SessionState.Running
-        val endsAt = running?.endsAt ?: (System.currentTimeMillis() + durationSec * 1_000L)
-        goForeground(target.orEmpty(), endsAt)
-        if (target == null || port == 0 || user == null || pass == null || durationSec <= 0) {
-            finish("invalid start request")
+        val credentials = if (user != null && pass != null) Socks5Credentials(user, pass) else null
+        val refusal = when {
+            finished -> "start after finish ignored"
+            running?.packageName != target || controller.socksPort != port || controller.credentials != credentials ->
+                "start request does not match the running session"
+            durationSec <= 0 -> "invalid duration"
+            else -> null
+        }
+        // Claim the session before going foreground, so a refused foreground still ends it.
+        ownsSession = refusal == null
+        if (!goForeground(target.orEmpty(), endsAt)) return
+        if (refusal != null || target == null || credentials == null) {
+            finish(refusal ?: "invalid start request")
             return
         }
 
-        val dns = upstreamDns()
+        val net = upstreamNetwork()
+        val builder = Builder()
+            .setSession("TrustProbe: $target")
+            .setMetered(false)
+            .addAddress(HevConfig.IPV4, 32)
+            .addRoute("0.0.0.0", 0)
+            .addDnsServer(net.dns)
+            .setMtu(HevConfig.MTU)
+        if (net.routeIpv6) builder.addAddress(HevConfig.IPV6, 128).addRoute("::", 0)
         val pfd = try {
-            Builder()
-                .setSession("TrustProbe: $target")
-                .addAddress(HevConfig.IPV4, 32)
-                .addAddress(HevConfig.IPV6, 128)
-                .addRoute("0.0.0.0", 0)
-                .addRoute("::", 0)
-                .addDnsServer(dns)
-                .setMtu(HevConfig.MTU)
-                .addAllowedApplication(target)
-                .establish()
+            builder.addAllowedApplication(target).establish()
         } catch (e: Exception) {
             Log.e(TAG, "could not build the VPN for $target", e)
             null
@@ -106,7 +130,7 @@ class TunnelService : VpnService() {
         }
         tunnel = Tunnel(pfd, target)
         try {
-            NativeTunnel.start(cacheDir, port, Socks5Credentials(user, pass), pfd.fd)
+            NativeTunnel.start(cacheDir, port, credentials, pfd.fd)
         } catch (e: Exception) {
             Log.e(TAG, "hev failed to start", e)
             finish("tunnel failed to start")
@@ -114,12 +138,16 @@ class TunnelService : VpnService() {
         }
         registerPackageRemoved()
         main.postDelayed(timeLimit, (endsAt - System.currentTimeMillis()).coerceAtLeast(0))
-        Log.i(TAG, "session running for $target via SOCKS5 port $port, DNS ${dns.hostAddress}")
+        main.postDelayed(hevCheck, HEV_CHECK_DELAY_MS)
+        Log.i(TAG, "session running for $target via SOCKS5 port $port")
+        Log.i(TAG, "upstream DNS ${net.dns.hostAddress}, IPv6 routed: ${net.routeIpv6}")
     }
 
-    /** Stops hev, closes the tun fd, then ends the session. Idempotent. */
+    /** Stops hev, closes the tun fd, then ends the session if this instance owns it. Idempotent. */
     private fun finish(reason: String) {
+        finished = true
         main.removeCallbacks(timeLimit)
+        main.removeCallbacks(hevCheck)
         if (receiverRegistered) {
             unregisterReceiver(packageRemoved)
             receiverRegistered = false
@@ -130,10 +158,13 @@ class TunnelService : VpnService() {
             NativeTunnel.stop()
             runCatching { t.pfd.close() }
         }
-        val controller = controller()
-        if (controller.state.value is SessionState.Running) {
-            controller.end()
+        if (ownsSession) {
+            ownsSession = false
+            val controller = controller()
+            if (controller.state.value is SessionState.Running) controller.end()
             Log.i(TAG, "session ended: $reason")
+        } else {
+            Log.i(TAG, "tunnel service stopping without a session: $reason")
         }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -141,11 +172,21 @@ class TunnelService : VpnService() {
 
     private fun controller() = (application as TrustProbeApp).sessionController
 
-    /** The first IPv4 DNS server of the network that is active before the VPN comes up. */
-    private fun upstreamDns(): InetAddress {
+    private class Upstream(val dns: InetAddress, val routeIpv6: Boolean)
+
+    /**
+     * Reads the network that is active before the VPN comes up: its first IPv4 DNS server (or
+     * [FALLBACK_DNS]) and whether it really has IPv6 ([Ipv6Policy]).
+     */
+    private fun upstreamNetwork(): Upstream {
         val cm = getSystemService(ConnectivityManager::class.java)
         val props = cm.activeNetwork?.let(cm::getLinkProperties)
-        return props?.dnsServers?.firstOrNull { it is Inet4Address } ?: InetAddress.getByName(FALLBACK_DNS)
+        val dns = props?.dnsServers?.firstOrNull { it is Inet4Address } ?: InetAddress.getByName(FALLBACK_DNS)
+        val ipv6 = props != null && Ipv6Policy.routeIpv6(
+            hasIpv6DefaultRoute = props.routes.any { it.isDefaultRoute && it.destination.address is Inet6Address },
+            addresses = props.linkAddresses.map { it.address },
+        )
+        return Upstream(dns, ipv6)
     }
 
     private fun registerPackageRemoved() {
@@ -160,9 +201,10 @@ class TunnelService : VpnService() {
 
     /**
      * An ongoing notification with a countdown to [endsAt] and a stop action. If notifications are
-     * denied the service still runs in the foreground; only the notification is hidden.
+     * denied the service still runs in the foreground; only the notification is hidden. Returns
+     * false (after finishing) if the system refuses the foreground service.
      */
-    private fun goForeground(target: String, endsAt: Long) {
+    private fun goForeground(target: String, endsAt: Long): Boolean {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Test session", NotificationManager.IMPORTANCE_LOW),
@@ -192,10 +234,13 @@ class TunnelService : VpnService() {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: RuntimeException) {
-            // systemExempted needs VPN consent; the caller ran VpnService.prepare, so this should
-            // not happen. Keep going: the system still binds an established VPN service.
+            // systemExempted is refused without VPN consent (VpnService.prepare not done), and a
+            // VPN app that is not in the foreground gets shut down: end here instead.
             Log.e(TAG, "could not enter the foreground", e)
+            finish("foreground service refused")
+            return false
         }
+        return true
     }
 
     companion object {
@@ -210,6 +255,7 @@ class TunnelService : VpnService() {
         private const val CHANNEL_ID = "session"
         private const val NOTIFICATION_ID = 1
         private const val FALLBACK_DNS = "1.1.1.1"
+        private const val HEV_CHECK_DELAY_MS = 1_500L
 
         /**
          * Starts the VPN for [packageName] into the engine at [socksPort]. The caller has already

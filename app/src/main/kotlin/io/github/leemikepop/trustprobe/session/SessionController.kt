@@ -38,6 +38,7 @@ class SessionController(
         val startedAt: Long,
     ) {
         lateinit var engine: ProbeEngine
+        var port = 0
         val events = ArrayList<EngineEvent>() // guarded by this
         var ended = false // guarded by this
     }
@@ -56,6 +57,9 @@ class SessionController(
 
     /** Credentials the tunnel must present to the running engine; null when no session runs. */
     val credentials: Socks5Credentials? get() = active?.engine?.credentials
+
+    /** The running engine's SOCKS5 port on 127.0.0.1; null when no session runs. */
+    val socksPort: Int? get() = active?.port
 
     /** Starts the engine for [packageName] and returns its SOCKS5 port on 127.0.0.1. */
     fun begin(packageName: String, appLabel: String, durationSec: Int = 300): Int = synchronized(lock) {
@@ -77,6 +81,7 @@ class SessionController(
             store.finish(id, clock())
             throw e
         }
+        session.port = port
         active = session
         _state.value = SessionState.Running(packageName, startedAt + durationSec * 1_000L)
         port

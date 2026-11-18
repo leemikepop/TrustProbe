@@ -52,6 +52,7 @@ class SessionControllerTest {
         assertTrue(port in 1..65535)
         assertEquals(SessionState.Running("com.example.app", 1_000L + 120_000L), controller.state.value)
         assertNotNull(controller.credentials)
+        assertEquals(port, controller.socksPort)
 
         val accepted = probed("a.example", ProbeCase.T2_UNTRUSTED_CA, OutcomeKind.ACCEPTED, 1_100)
         val forwarded = EngineEvent.Forwarded("b.example:80", 1_200, ForwardReason.NON_TLS_PORT)
@@ -70,6 +71,7 @@ class SessionControllerTest {
         assertEquals(Verdict.VULNERABLE, report.appVerdict)
         assertEquals(SessionState.Finished(report), controller.state.value)
         assertNull(controller.credentials)
+        assertNull(controller.socksPort)
 
         val session = store.sessions.single()
         assertEquals(listOf<EngineEvent>(accepted, forwarded), session.events)
