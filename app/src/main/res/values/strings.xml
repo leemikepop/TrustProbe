@@ -1,3 +1,48 @@
 <resources>
     <string name="app_name">TrustProbe</string>
+
+    <string name="picker_title">Pick an app to test</string>
+    <string name="picker_search">Search apps</string>
+    <string name="picker_duration">Test length</string>
+    <string name="picker_minutes">%1$d min</string>
+    <string name="picker_start">Start</string>
+    <string name="picker_starting">Starting…</string>
+    <string name="picker_empty">No matching apps</string>
+    <string name="history">History</string>
+    <string name="start_error">Could not start the test: %1$s</string>
+    <string name="dismiss">Dismiss</string>
+    <string name="back">Back</string>
+
+    <string name="session_title">Testing %1$s</string>
+    <string name="session_prompt">Now go use this app: sign in, refresh a page, open a few screens.</string>
+    <string name="session_remaining">Time left %1$s</string>
+    <string name="session_events">Live connections</string>
+    <string name="session_waiting">Waiting for the app to connect…</string>
+    <string name="session_stop">Stop</string>
+    <string name="event_probed">%1$s: %2$s</string>
+    <string name="event_forwarded">forwarded (%1$s)</string>
+    <string name="event_quic">QUIC dropped</string>
+
+    <string name="report_title">Report</string>
+    <string name="verdict_vulnerable">VULNERABLE</string>
+    <string name="verdict_pass">PASS</string>
+    <string name="verdict_inconclusive">INCONCLUSIVE</string>
+    <string name="report_summary">%1$d of %2$d hosts vulnerable</string>
+    <string name="report_hosts">Hosts</string>
+    <string name="report_cases">Cases run: %1$s</string>
+    <string name="report_self_signed_untested">self-signed case not tested</string>
+    <string name="report_hostname_untested">hostname case not tested</string>
+    <string name="report_evidence">Evidence (first request, masked)</string>
+    <string name="report_show_full">Show full content</string>
+    <string name="report_hide_full">Hide full content</string>
+    <string name="report_full_warning">Shown on this screen only. It is never saved or exported.</string>
+    <string name="report_full_missing">No content was captured.</string>
+    <string name="report_export_md">Export Markdown</string>
+    <string name="report_export_json">Export JSON</string>
+    <string name="report_exported">Saved</string>
+    <string name="report_export_failed">Export failed</string>
+
+    <string name="history_title">History</string>
+    <string name="history_empty">No tests yet</string>
+    <string name="history_open">Open</string>
 </resources>

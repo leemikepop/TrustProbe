@@ -94,15 +94,17 @@ class TunnelService : VpnService() {
             return
         }
         val credentials = if (user != null && pass != null) Socks5Credentials(user, pass) else null
+        val matches = running?.packageName == target && controller.socksPort == port &&
+            controller.credentials == credentials
         val refusal = when {
             finished -> "start after finish ignored"
-            running?.packageName != target || controller.socksPort != port || controller.credentials != credentials ->
-                "start request does not match the running session"
+            !matches -> "start request does not match the running session"
             durationSec <= 0 -> "invalid duration"
             else -> null
         }
-        // Claim the session before going foreground, so a refused foreground still ends it.
-        ownsSession = refusal == null
+        // Claim the session on a match alone, so a start refused for any other reason (or a refused
+        // foreground) still ends the session it matched instead of leaving it running.
+        ownsSession = matches
         if (!goForeground(target.orEmpty(), endsAt)) return
         if (refusal != null || target == null || credentials == null) {
             finish(refusal ?: "invalid start request")

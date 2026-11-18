@@ -1,0 +1,7 @@
+<resources>
+    <!-- Follows the system dark/light setting for the window behind Compose. -->
+    <style name="Theme.TrustProbe" parent="android:Theme.DeviceDefault.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+</resources>
