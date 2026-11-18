@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Debug builds only: lets adb begin a session without the UI (manual checks, Task 14). -->
+    <application>
+        <activity
+            android:name=".debug.DebugSessionActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay" />
+    </application>
+
+</manifest>
